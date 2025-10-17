@@ -1,0 +1,105 @@
+# Operating system files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor/IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*~.nib
+
+# Visual Studio / .NET
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.vs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+env/
+.venv/
+.Python
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+build/
+dist/
+htmlcov/
+.coverage
+
+# Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log
+.cache/
+.next/
+out/
+dist/
+
+# Java / Maven / Gradle
+target/
+build/
+.gradle/
+*.class
+*.jar
+*.war
+*.ear
+*.iml
+
+# C/C++ / compiled outputs
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.out
+*.a
+*.lib
+
+# Logs and runtime files
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# Secrets, keys, configs
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+secrets.*
+secret*
+
+# Archives / packages
+*.zip
+*.tar.gz
+*.tar
+*.gz
+*.rar
+
+# Misc / tools
+coverage/
+coverage.xml
+.vagrant/
+terraform.tfstate
+terraform.tfstate.backup
+
+# Local project files
+local.properties
+.idea/
+.vscode/settings.json

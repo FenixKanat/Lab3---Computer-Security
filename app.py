@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import sqlite3
 import os
 import base64
@@ -15,6 +15,7 @@ app.config['PEPPER'] = os.environ.get('APP_PEPPER', 'change_this_pepper_for_demo
 
 PBKDF2_ITERATIONS = 200_000
 BCRYPT_ROUNDS = 12
+USE_PEPPER = False
 
 
 # ---------------- Database ----------------
@@ -74,8 +75,13 @@ def verify_bcrypt(password: str, stored: str):
 
 # ---------------- Routes ----------------
 @app.route('/')
-def index():
-    return "Server is running! You can test /register, /login, and /salt_pepper_demo with POST."
+@app.route('/home')
+def home():
+    return render_template('home.html')
+
+@app.route('/signup')
+def signup():
+    return render_template('signup.html')
 
 
 @app.route('/register', methods=['POST'])
@@ -84,14 +90,13 @@ def register():
     username = data.get('username')
     password = data.get('password')
     algo = (data.get('algo') or 'bcrypt').lower()
-    use_pepper = bool(data.get('use_pepper', False))
 
     if not username or not password:
         return jsonify({'error': 'Username and password are required'}), 400
 
     salt = generate_salt()
     effective_password = password
-    if use_pepper:
+    if USE_PEPPER:
         effective_password = app.config['PEPPER'] + password
 
     try:
@@ -122,7 +127,6 @@ def login():
     data = request.get_json(force=True)
     username = data.get('username')
     password = data.get('password')
-    use_pepper = bool(data.get('use_pepper', False))
 
     if not username or not password:
         return jsonify({'error': 'Username and password are required'}), 400
@@ -136,9 +140,9 @@ def login():
         return jsonify({'error': 'Invalid username or password'}), 401
 
     user_id, stored_hash, salt, algo = row
-    effective_password = app.config['PEPPER'] + password if use_pepper else password
+    effective_password = app.config['PEPPER'] + password if USE_PEPPER else password
 
-    print(f"[LOGIN] username={username}, algo={algo}, pepper={use_pepper}")
+    print(f"[LOGIN] username={username}, algo={algo}, pepper={USE_PEPPER}")
 
     verified = False
     if algo in ('sha256', 'sha3', 'sha3_256'):
@@ -184,5 +188,9 @@ def salt_pepper_demo():
 
 # ---------------- Run app ----------------
 if __name__ == '__main__':
+    arguments = os.sys.argv
+    if len(arguments) > 1 and arguments[1] == 'pepper':
+        USE_PEPPER = True
     init_db()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    print(f"Starting app with USE_PEPPER = {USE_PEPPER}")
+    app.run(host='0.0.0.0', port=5000, debug=False)

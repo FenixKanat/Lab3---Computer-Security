@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>FlaskApp Home</title>
+    <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
+</head>
+<body>
+  <h2>Log in</h2>
+  <input id="user" placeholder="Username">
+  <input id="pass" placeholder="Password" type="password">
+  <button onclick="login()">Log in</button>
+  <a href="{{ url_for('signup') }}" class="button-link">Create Account</a>
+
+  <pre id="result"></pre>
+  <script>
+    const base = "http://127.0.0.1:5000";
+
+    async function login() {
+      const data = {
+        username: document.getElementById("user").value,
+        password: document.getElementById("pass").value
+      };
+      const res = await fetch(`${base}/login`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+      });
+      document.getElementById("result").textContent = await res.text();
+    }
+  </script>
+</body>
+</html>

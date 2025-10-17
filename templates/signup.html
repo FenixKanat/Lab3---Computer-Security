@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Register</title>
+    <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
+</head>
+<body>
+  <h2>Register</h2>
+  <input id="user" placeholder="Username">
+  <input id="pass" placeholder="Password" type="password">
+  <label for="algo">Select Hashing Algorithm:</label>
+  <select id="algo">
+    <option value="bcrypt">bcrypt</option>
+    <option value="sha256">sha256</option>
+    <option value="sha3">sha3</option>
+  </select>
+  <button onclick="register()">Register</button>
+  <a href="{{ url_for('home') }}" class="button-link">Back to Login</a>
+  <pre id="result"></pre>
+
+  
+  <script>
+    const base = "http://127.0.0.1:5000";
+
+    async function register() {
+      const data = {
+        username: document.getElementById("user").value,
+        password: document.getElementById("pass").value
+      };
+      const res = await fetch(`${base}/register`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+      });
+      document.getElementById("result").textContent = await res.text();
+    }
+  </script>
+</body>
+</html>

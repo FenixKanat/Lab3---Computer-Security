@@ -1,0 +1,15 @@
+# Steps to Run Flask App
+
+1. **Install dependencies**
+    ```
+    pip install -r requirements.txt
+    ```
+
+2. **Run the Flask app**
+    ```
+    python.exe app.py <USE_PEPPER> 
+    ```
+    true to activate peppering on encryption/decryption
+
+3. **Access the app**
+    Open your browser and go to: http://127.0.0.1:5000/
