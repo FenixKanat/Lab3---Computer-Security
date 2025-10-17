@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="UTF-8">
+  <title>Testa Flask-API</title>
+  <style>
+    body { font-family: sans-serif; max-width: 400px; margin: 2rem auto; }
+    input, button { width: 100%; margin: .5rem 0; padding: .5rem; }
+    pre { background: #f4f4f4; padding: 1rem; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h2>Registrera användare</h2>
+  <input id="user" placeholder="Användarnamn">
+  <input id="pass" placeholder="Lösenord" type="password">
+  <select id="algo">
+    <option value="bcrypt">bcrypt</option>
+    <option value="sha256">sha256</option>
+    <option value="sha3">sha3</option>
+  </select>
+  <button onclick="register()">Registrera</button>
+
+  <h2>Logga in</h2>
+  <input id="user2" placeholder="Användarnamn">
+  <input id="pass2" placeholder="Lösenord" type="password">
+  <button onclick="login()">Logga in</button>
+
+  <pre id="result"></pre>
+
+  <script>
+    const base = "http://127.0.0.1:5000";
+
+    async function register() {
+      const data = {
+        username: document.getElementById("user").value,
+        password: document.getElementById("pass").value,
+        algo: document.getElementById("algo").value
+      };
+      const res = await fetch(`${base}/register`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+      });
+      document.getElementById("result").textContent = await res.text();
+    }
+
+    async function login() {
+      const data = {
+        username: document.getElementById("user2").value,
+        password: document.getElementById("pass2").value
+      };
+      const res = await fetch(`${base}/login`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(data)
+      });
+      document.getElementById("result").textContent = await res.text();
+    }
+  </script>
+</body>
+</html>
