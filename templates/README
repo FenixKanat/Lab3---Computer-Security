@@ -11,9 +11,9 @@
 2. **Run the Flask app**
 
     ```
-    python.exe app.py <USE_PEPPER> 
+    python.exe app.py <pepper> 
     ```
-    <USE_PEPPER> = true to activate peppering on encryption/decryption
+    if <pepper> is present we activate peppering on encryption/decryption
 
 3. **Access the app**
     Open your browser and go to: http://127.0.0.1:5000/

@@ -12,7 +12,7 @@ app = Flask(__name__)
 CORS(app)
 
 DATABASE = 'users.db'
-app.config['PEPPER'] = os.environ.get('APP_PEPPER', 'change_this_pepper_for_demo_only')
+app.config['PEPPER'] = 'this_is_a_secret_pepper_value'
 
 PBKDF2_ITERATIONS = 200_000
 BCRYPT_ROUNDS = 12
