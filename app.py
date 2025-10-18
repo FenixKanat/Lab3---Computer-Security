@@ -32,39 +32,33 @@ def init_db():
 
 # ---------------- Hashing functions ----------------
 def generate_salt(length=16):
-    return base64.b64encode(os.urandom(length)).decode('ascii')
+    return os.urandom(length)
 
-
-def pbkdf2_hash(password: str, salt: str, algo_name='sha256', iterations=PBKDF2_ITERATIONS):
+# Both SHA-256 and SHA-3 belong to Password-Based Key Derivation Function 2
+def pbkdf2_hash(password: str, salt: bytes, algo: str, iterations=PBKDF2_ITERATIONS):
     password_bytes = password.encode('utf-8')
-    salt_bytes = base64.b64decode(salt.encode('ascii'))
-    if algo_name.lower() == 'sha256':
-        dk = hashlib.pbkdf2_hmac('sha256', password_bytes, salt_bytes, iterations)
-    elif algo_name.lower() in ('sha3_256', 'sha3'):
-        dk = hashlib.pbkdf2_hmac('sha3_256', password_bytes, salt_bytes, iterations)
+    if algo == 'sha256':
+        hashed_bytes = hashlib.pbkdf2_hmac(algo, password=password_bytes, salt=salt, iterations=iterations)
+    elif algo == 'sha3':
+        hashed_bytes = hashlib.pbkdf2_hmac("sha3_256", password=password_bytes, salt=salt, iterations=iterations)
     else:
         raise ValueError("Unsupported pbkdf2 algorithm")
-    return f"pbkdf2${algo_name}${iterations}${salt}${dk.hex()}"
+
+    return salt.hex() , hashed_bytes.hex()
 
 
-def verify_pbkdf2(password: str, stored: str):
-    try:
-        parts = stored.split('$')
-        if len(parts) != 5 or parts[0] != 'pbkdf2':
-            return False
-        _, algo, iterations_s, salt, hash_hex = parts
-        iterations = int(iterations_s)
-        recomputed = pbkdf2_hash(password, salt, algo, iterations)
-        return compare_digest(recomputed, stored)
-    except Exception:
-        return False
+def verify_pbkdf2(attempted_password: str, stored_hash: str, salt: str, algo: str, iterations=PBKDF2_ITERATIONS):
+
+    (_, recomputed_hash) = pbkdf2_hash(attempted_password, bytes.fromhex(salt), algo, iterations=iterations)
+    return compare_digest(bytes.fromhex(recomputed_hash), bytes.fromhex(stored_hash))
+
 
 
 def bcrypt_hash(password: str):
     pw = password.encode('utf-8')
     salt = bcrypt.gensalt(rounds=BCRYPT_ROUNDS)
     h = bcrypt.hashpw(pw, salt)
-    return h.decode('utf-8')
+    return (h.decode('utf-8'), salt.decode('utf-8'))
 
 
 def verify_bcrypt(password: str, stored: str):
@@ -89,23 +83,21 @@ def register():
     data = request.get_json(force=True)
     username = data.get('username')
     password = data.get('password')
-    algo = (data.get('algo') or 'bcrypt').lower()
+    algo = data.get('algo')
 
     if not username or not password:
         return jsonify({'error': 'Username and password are required'}), 400
 
-    salt = generate_salt()
+    generated_salt = generate_salt()
     effective_password = password
     if USE_PEPPER:
         effective_password = app.config['PEPPER'] + password
 
     try:
-        if algo in ('sha256', 'sha3', 'sha3_256'):
-            algo_name = 'sha256' if algo == 'sha256' else 'sha3_256'
-            password_hash = pbkdf2_hash(effective_password, salt, algo_name)
+        if algo in ('sha256', 'sha3'):
+            password_hash, salt = pbkdf2_hash(effective_password, generated_salt, algo)
         elif algo == 'bcrypt':
-            password_hash = bcrypt_hash(effective_password)
-            salt = ''
+            (password_hash, salt) = bcrypt_hash(effective_password)
         else:
             return jsonify({'error': 'Unsupported algorithm'}), 400
 
@@ -140,15 +132,15 @@ def login():
         return jsonify({'error': 'Invalid username or password'}), 401
 
     user_id, stored_hash, salt, algo = row
-    effective_password = app.config['PEPPER'] + password if USE_PEPPER else password
+    attempted_password = app.config['PEPPER'] + password if USE_PEPPER else password
 
     print(f"[LOGIN] username={username}, algo={algo}, pepper={USE_PEPPER}")
 
     verified = False
-    if algo in ('sha256', 'sha3', 'sha3_256'):
-        verified = verify_pbkdf2(effective_password, stored_hash)
+    if algo in ('sha256', 'sha3'):
+        verified = verify_pbkdf2(attempted_password, stored_hash, salt, algo)
     elif algo == 'bcrypt':
-        verified = verify_bcrypt(effective_password, stored_hash)
+        verified = verify_bcrypt(attempted_password, stored_hash)
 
     print(f"[LOGIN] verified={verified}")
 
@@ -158,32 +150,32 @@ def login():
         return jsonify({'error': 'Invalid username or password'}), 401
 
 
-@app.route('/salt_pepper_demo', methods=['POST'])
-def salt_pepper_demo():
-    data = request.get_json(force=True)
-    password = data.get('password')
-    if not password:
-        return jsonify({'error': 'Password required'}), 400
+# @app.route('/salt_pepper_demo', methods=['POST'])
+# def salt_pepper_demo():
+#     data = request.get_json(force=True)
+#     password = data.get('password')
+#     if not password:
+#         return jsonify({'error': 'Password required'}), 400
 
-    salt_user = generate_salt()
-    hash_with_salt = pbkdf2_hash(password, salt_user, 'sha256', PBKDF2_ITERATIONS)
+#     salt_user = generate_salt()
+#     hash_with_salt = pbkdf2_hash(password, salt_user, 'sha256', PBKDF2_ITERATIONS)
 
-    pepper = app.config.get('PEPPER')
-    hash_with_pepper = pbkdf2_hash(pepper + password, generate_salt(), 'sha256', PBKDF2_ITERATIONS)
+#     pepper = app.config.get('PEPPER')
+#     hash_with_pepper = pbkdf2_hash(pepper + password, generate_salt(), 'sha256', PBKDF2_ITERATIONS)
 
-    explanation = [
-        "Per-user salt ensures unique hashes for identical passwords.",
-        "System-wide pepper is stored outside the DB; without it, hashes are useless.",
-        "Best practice: use both salt and pepper with a slow hash like bcrypt."
-    ]
+#     explanation = [
+#         "Per-user salt ensures unique hashes for identical passwords.",
+#         "System-wide pepper is stored outside the DB; without it, hashes are useless.",
+#         "Best practice: use both salt and pepper with a slow hash like bcrypt."
+#     ]
 
-    return jsonify({
-        'hash_with_salt_example': hash_with_salt,
-        'salt_stored_example': salt_user,
-        'hash_with_pepper_example': hash_with_pepper,
-        'pepper_note': "Pepper is not stored in the database; it's from environment variables.",
-        'explanation': explanation
-    }), 200
+#     return jsonify({
+#         'hash_with_salt_example': hash_with_salt,
+#         'salt_stored_example': salt_user,
+#         'hash_with_pepper_example': hash_with_pepper,
+#         'pepper_note': "Pepper is not stored in the database; it's from environment variables.",
+#         'explanation': explanation
+#     }), 200
 
 
 # ---------------- Run app ----------------

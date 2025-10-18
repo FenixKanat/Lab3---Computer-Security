@@ -26,7 +26,8 @@
     async function register() {
       const data = {
         username: document.getElementById("user").value,
-        password: document.getElementById("pass").value
+        password: document.getElementById("pass").value,
+        algo: document.getElementById("algo").value
       };
       const res = await fetch(`${base}/register`, {
         method: "POST",
