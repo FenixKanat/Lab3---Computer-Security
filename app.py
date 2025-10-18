@@ -236,34 +236,6 @@ def message():
     print(f"[MESSAGE] {message}")
     return jsonify({'message': 'Message verified successfully with HMAC'}), 200
 
-# @app.route('/salt_pepper_demo', methods=['POST'])
-# def salt_pepper_demo():
-#     data = request.get_json(force=True)
-#     password = data.get('password')
-#     if not password:
-#         return jsonify({'error': 'Password required'}), 400
-
-#     salt_user = generate_salt()
-#     hash_with_salt = pbkdf2_hash(password, salt_user, 'sha256', PBKDF2_ITERATIONS)
-
-#     pepper = app.config.get('PEPPER')
-#     hash_with_pepper = pbkdf2_hash(pepper + password, generate_salt(), 'sha256', PBKDF2_ITERATIONS)
-
-#     explanation = [
-#         "Per-user salt ensures unique hashes for identical passwords.",
-#         "System-wide pepper is stored outside the DB; without it, hashes are useless.",
-#         "Best practice: use both salt and pepper with a slow hash like bcrypt."
-#     ]
-
-#     return jsonify({
-#         'hash_with_salt_example': hash_with_salt,
-#         'salt_stored_example': salt_user,
-#         'hash_with_pepper_example': hash_with_pepper,
-#         'pepper_note': "Pepper is not stored in the database; it's from environment variables.",
-#         'explanation': explanation
-#     }), 200
-
-
 # ---------------- Run app ----------------
 if __name__ == '__main__':
     arguments = os.sys.argv
