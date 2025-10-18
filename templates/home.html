@@ -6,15 +6,18 @@
     <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
 </head>
 <body>
-  <h2>Log in</h2>
+  <h2 id="header">Log in</h2>
   <input id="user" placeholder="Username">
   <input id="pass" placeholder="Password" type="password">
-  <button onclick="login()">Log in</button>
-  <a href="{{ url_for('signup') }}" class="button-link">Create Account</a>
+  <button id="loginBtn" onclick="login()">Log in</button>
+  <input id="message" placeholder="Message" hidden="true">
+  <button id="sendBtn" onclick="sendMessage()" hidden="true">Send</button>
+  <a id="signup" href="{{ url_for('signup') }}" class="button-link">Create Account</a>
 
   <pre id="result"></pre>
   <script>
     const base = "http://127.0.0.1:5000";
+    let hmac_tag = "";
 
     async function login() {
       const data = {
@@ -27,6 +30,42 @@
         body: JSON.stringify(data)
       });
       document.getElementById("result").textContent = await res.text();
+      const jsonResponse = JSON.parse(document.getElementById("result").textContent);
+      if (res.status === 200) {
+        console.log("Login successful:", jsonResponse);
+        hmac_tag = jsonResponse.hmac; // Assuming the server returns a tag
+        document.getElementById("message").hidden = false;
+        document.getElementById("sendBtn").hidden = false;
+        document.getElementById("loginBtn").hidden = true;
+        document.getElementById("signup").hidden = true;
+        document.getElementById("header").innerHTML = "Welcome, " + data.username;
+      } else {
+        console.error("Login failed:", jsonResponse);
+      }
+    }
+
+    async function sendMessage() {
+      const message = document.getElementById("message").value;
+      const data = {
+        message: message,
+        hmac_tag: hmac_tag
+      };
+      const res = await fetch(`${base}/message`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(data)
+      });
+      document.getElementById("result").textContent = await res.text();
+      const jsonResponse = JSON.parse(document.getElementById("result").textContent);
+      if (res.status === 200) {
+        
+        console.log("Message sent successfully:", jsonResponse);
+      } else {
+        console.error("Message sending failed:", jsonResponse);
+
+      }
     }
   </script>
 </body>

@@ -1,8 +1,9 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, json, request, jsonify, render_template
 import sqlite3
 import os
 import base64
 import hashlib
+import hmac
 from secrets import compare_digest
 import bcrypt
 from flask_cors import CORS
@@ -21,6 +22,7 @@ ARGON2_MEMORY_COST = 64 * 1024
 ARGON2_PARALLELISM = 4
 ARGON2_HASH_LEN = 32
 USE_PEPPER = False
+MAC_SECRET_KEY = b'super_secret_mac_key'
 
 
 # ---------------- Database ----------------
@@ -87,6 +89,47 @@ def argon2_hash(password: str, salt: bytes):
 def verify_argon2(attempted_password: str, stored_hash: str, salt: str):
     (recomputed_hash, _) = argon2_hash(attempted_password, bytes.fromhex(salt))
     return compare_digest(bytes.fromhex(recomputed_hash), bytes.fromhex(stored_hash))
+
+# ---------------- MAC/HMAC functions ----------------
+
+def create_naive_mac(user_id: int):
+    
+    payload = {'user_id': user_id}
+    data_bytes = json.dumps(payload).encode('utf-8')
+    data_b64 = base64.b64encode(data_bytes).decode('utf-8')
+    mac = hashlib.sha256(MAC_SECRET_KEY + data_bytes).hexdigest()
+
+    return f"{data_b64}.{mac}"
+
+def create_hmac(user_id: int):
+
+    payload = {'user_id': user_id}
+    data_bytes = json.dumps(payload).encode('utf-8')
+    data_b64 = base64.b64encode(data_bytes).decode('utf-8')
+
+    hmac_tag = hmac.new(MAC_SECRET_KEY, data_bytes, hashlib.sha256)
+    h = hmac_tag.hexdigest()
+
+    return f"{data_b64}.{h}"
+
+def verify_hmac(hmac_tag: str):
+    try:
+        data_b64, received_tag = hmac_tag.split('.', 1)
+    except ValueError:
+        return None 
+        
+    try:
+        data_str = base64.b64decode(data_b64).decode('utf-8')
+    except Exception:
+        return None 
+    
+    expected_tag = hmac.new(
+        key=MAC_SECRET_KEY, 
+        msg=data_str.encode('utf-8'), 
+        digestmod=hashlib.sha256
+    ).hexdigest()
+
+    return compare_digest(expected_tag, received_tag)
 
 
 # ---------------- Routes ----------------
@@ -171,10 +214,27 @@ def login():
     print(f"[LOGIN] verified={verified}")
 
     if verified:
-        return jsonify({'message': 'Login successful', 'user_id': user_id}), 200
+        naive_mac = create_naive_mac(user_id)
+        hmac = create_hmac(user_id)
+        return jsonify({'message': 'Login successful', 'user_id': user_id, 'naive_mac': naive_mac, 'hmac': hmac}), 200
     else:
         return jsonify({'error': 'Invalid username or password'}), 401
 
+@app.route('/message', methods=['POST'])
+def message():
+    data = request.get_json(force=True)
+    message = data.get('message')
+    hmac_tag = data.get('hmac_tag')
+
+    if not message or not hmac_tag:
+        return jsonify({'error': 'Message and HMAC tag are required'}), 400
+
+    # Verify the HMAC tag
+    if not verify_hmac(hmac_tag):
+        return jsonify({'error': 'Invalid HMAC tag'}), 403
+
+    print(f"[MESSAGE] {message}")
+    return jsonify({'message': 'Message verified successfully with HMAC'}), 200
 
 # @app.route('/salt_pepper_demo', methods=['POST'])
 # def salt_pepper_demo():

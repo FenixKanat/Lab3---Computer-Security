@@ -14,6 +14,7 @@ input, button {
 pre {
     background: #f4f4f4;
     padding: 1rem;
+    text-wrap: wrap;
     border-radius: 8px;
 }
 
