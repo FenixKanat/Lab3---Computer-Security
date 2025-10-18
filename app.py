@@ -44,12 +44,12 @@ def pbkdf2_hash(password: str, salt: bytes, algo: str, iterations=PBKDF2_ITERATI
     else:
         raise ValueError("Unsupported pbkdf2 algorithm")
 
-    return salt.hex() , hashed_bytes.hex()
+    return hashed_bytes.hex(), salt.hex()
 
 
 def verify_pbkdf2(attempted_password: str, stored_hash: str, salt: str, algo: str, iterations=PBKDF2_ITERATIONS):
 
-    (_, recomputed_hash) = pbkdf2_hash(attempted_password, bytes.fromhex(salt), algo, iterations=iterations)
+    (recomputed_hash, _) = pbkdf2_hash(attempted_password, bytes.fromhex(salt), algo, iterations=iterations)
     return compare_digest(bytes.fromhex(recomputed_hash), bytes.fromhex(stored_hash))
 
 
