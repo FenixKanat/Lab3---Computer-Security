@@ -9,6 +9,15 @@ import bcrypt
 from flask_cors import CORS
 from argon2 import low_level
 
+from mfa import (
+    random_secret,
+    otpauth_uri_totp,
+    otpauth_uri_hotp,
+    qr_data_url,
+    verify_totp,
+    verify_hotp_and_advance,
+)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -35,6 +44,16 @@ def init_db():
                         salt TEXT,
                         algo TEXT NOT NULL,
                         mfa_secret TEXT)''')
+        # MFA) minimal, additive columns ===
+        def add_column_if_missing(column, coldef):
+            cur = conn.execute("PRAGMA table_info(users)")
+            cols = [r[1] for r in cur.fetchall()]
+            if column not in cols:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {column} {coldef}")
+        add_column_if_missing('mfa_type', 'TEXT')                      # 'totp' or 'hotp'
+        add_column_if_missing('hotp_counter', 'INTEGER DEFAULT 0')     # for HOTP resync demo
+        add_column_if_missing('mfa_accepts', 'INTEGER DEFAULT 0')      # stats
+        add_column_if_missing('mfa_failures', 'INTEGER DEFAULT 0')
 
 
 # ---------------- Hashing functions ----------------
@@ -214,9 +233,23 @@ def login():
     print(f"[LOGIN] verified={verified}")
 
     if verified:
+        # If user has MFA, require OTP before issuing final hmac
+        with sqlite3.connect(DATABASE) as conn:
+            cur = conn.execute("SELECT mfa_secret, mfa_type FROM users WHERE id = ?", (user_id,))
+            mfa_row = cur.fetchone()
+        mfa_required = bool(mfa_row and mfa_row[0])
+        if mfa_required:
+            # Do NOT send final hmac yet. Client must call /mfa/verify to get it.
+            return jsonify({
+                'message': 'Password OK — MFA required',
+                'user_id': user_id,
+                'mfa_required': True,
+                'mfa_type': mfa_row[1]
+            }), 200
+        # No MFA → same behavior as before
         naive_mac = create_naive_mac(user_id)
-        hmac = create_hmac(user_id)
-        return jsonify({'message': 'Login successful', 'user_id': user_id, 'naive_mac': naive_mac, 'hmac': hmac}), 200
+        hmac_tag = create_hmac(user_id)
+        return jsonify({'message': 'Login successful', 'user_id': user_id, 'naive_mac': naive_mac, 'hmac': hmac_tag}), 200
     else:
         return jsonify({'error': 'Invalid username or password'}), 401
 
@@ -235,6 +268,110 @@ def message():
 
     print(f"[MESSAGE] {message}")
     return jsonify({'message': 'Message verified successfully with HMAC'}), 200
+
+# MFA
+@app.route('/mfa/enroll', methods=['POST'])
+def mfa_enroll():
+    """
+    Body: { "username": "...", "type": "totp" | "hotp" }
+    Creates secret, stores it, returns otpauth URI + QR data URL.
+    """
+    data = request.get_json(force=True)
+    username = data.get('username')
+    mfa_type = (data.get('type') or 'totp').lower()
+    if mfa_type not in ('totp', 'hotp'):
+        return jsonify({'error': 'type must be totp or hotp'}), 400
+
+    with sqlite3.connect(DATABASE) as conn:
+        cur = conn.execute("SELECT id FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'User not found'}), 404
+
+        secret = random_secret()
+        if mfa_type == 'totp':
+            uri = otpauth_uri_totp(secret, username)
+        else:
+            uri = otpauth_uri_hotp(secret, username, counter=0)
+
+        conn.execute("""
+            UPDATE users SET mfa_secret=?, mfa_type=?, hotp_counter=0 WHERE username=?
+        """, (secret, mfa_type, username))
+
+    qr_url = qr_data_url(uri)
+    return jsonify({
+        'message': f'{mfa_type.upper()} MFA enrolled',
+        'secret': secret,
+        'otpauth_uri': uri,
+        'qr_data_url': qr_url
+    }), 200
+
+
+@app.route('/mfa/verify', methods=['POST'])
+def mfa_verify():
+    """
+    Body:
+    {
+      "username": "...",
+      "code": "123456",
+      "window": 0|1,        # TOTP +/- (default 0)
+      "look_ahead": 0|1     # HOTP look-ahead (default 0)
+    }
+    On success, also returns 'hmac' so the client can proceed after password step.
+    """
+    data = request.get_json(force=True)
+    username = data.get('username')
+    code = (data.get('code') or "").strip()
+    window = int(data.get('window') or 0)
+    look_ahead = int(data.get('look_ahead') or 0)
+
+    if not username or not code:
+        return jsonify({'error': 'username and code required'}), 400
+
+    with sqlite3.connect(DATABASE) as conn:
+        cur = conn.execute("""
+            SELECT id, mfa_secret, mfa_type, hotp_counter, mfa_accepts, mfa_failures
+            FROM users WHERE username=?
+        """, (username,))
+        row = cur.fetchone()
+        if not row or not row[1]:
+            return jsonify({'error': 'MFA not enrolled for this user'}), 400
+
+        user_id, secret, mfa_type, hotp_counter, accepts, failures = row
+
+        if mfa_type == 'totp':
+            ok = verify_totp(secret, code, window=window)
+            if ok:
+                accepts = (accepts or 0) + 1
+                conn.execute("UPDATE users SET mfa_accepts=? WHERE id=?", (accepts, user_id))
+                # Issue final token now that MFA passed
+                hmac_tag = create_hmac(user_id)
+                return jsonify({'result': 'accepted', 'type': 'totp', 'window': window,
+                                'accepts': accepts, 'failures': failures or 0, 'hmac': hmac_tag}), 200
+            else:
+                failures = (failures or 0) + 1
+                conn.execute("UPDATE users SET mfa_failures=? WHERE id=?", (failures, user_id))
+                return jsonify({'result': 'rejected', 'type': 'totp', 'window': window,
+                                'accepts': accepts or 0, 'failures': failures}), 401
+
+        # HOTP:
+        hotp_counter = hotp_counter or 0
+        ok, new_counter, matched_offset = verify_hotp_and_advance(secret, code, hotp_counter, look_ahead=look_ahead)
+        if ok:
+            accepts = (accepts or 0) + 1
+            conn.execute("UPDATE users SET mfa_accepts=?, hotp_counter=? WHERE id=?",
+                         (accepts, new_counter, user_id))
+            hmac_tag = create_hmac(user_id)
+            return jsonify({'result': 'accepted', 'type': 'hotp',
+                            'matched_offset': matched_offset, 'new_counter': new_counter,
+                            'accepts': accepts, 'failures': failures or 0, 'hmac': hmac_tag}), 200
+        else:
+            failures = (failures or 0) + 1
+            conn.execute("UPDATE users SET mfa_failures=? WHERE id=?", (failures, user_id))
+            return jsonify({'result': 'rejected', 'type': 'hotp',
+                            'look_ahead': look_ahead, 'server_counter': hotp_counter,
+                            'accepts': accepts or 0, 'failures': failures}), 401
+
 
 # ---------------- Run app ----------------
 if __name__ == '__main__':

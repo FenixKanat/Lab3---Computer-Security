@@ -10,6 +10,31 @@
   <input id="user" placeholder="Username">
   <input id="pass" placeholder="Password" type="password">
   <button id="loginBtn" onclick="login()">Log in</button>
+
+  <!-- OTP only shows if /login says MFA is required -->
+  <div id="mfaPanel" style="display:none; margin-top: 1rem;">
+    <h3>MFA required</h3>
+    <div id="mfaStatus" style="margin-bottom:.5rem;"></div>
+    <input id="otp" placeholder="Enter OTP code">
+    <div class="checkbox-container">
+      <div>
+        <label>Window (TOTP):</label>
+        <select id="window">
+          <option value="0">±0</option>
+          <option value="1">±1</option>
+        </select>
+      </div>
+      <div style="margin-left:10px;">
+        <label>Look-ahead (HOTP):</label>
+        <select id="lookAhead">
+          <option value="0">0</option>
+          <option value="1">1</option>
+        </select>
+      </div>
+    </div>
+    <button onclick="verifyMFA()">Verify OTP</button>
+  </div>
+
   <input id="message" placeholder="Message" hidden="true">
   <button id="sendBtn" onclick="sendMessage()" hidden="true">Send</button>
   <a id="signup" href="{{ url_for('signup') }}" class="button-link">Create Account</a>
@@ -18,54 +43,85 @@
   <script>
     const base = "http://127.0.0.1:5000";
     let hmac_tag = "";
+    let lastUsername = "";
 
     async function login() {
       const data = {
         username: document.getElementById("user").value,
         password: document.getElementById("pass").value
       };
+      lastUsername = data.username;
+
       const res = await fetch(`${base}/login`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(data)
       });
-      document.getElementById("result").textContent = await res.text();
-      const jsonResponse = JSON.parse(document.getElementById("result").textContent);
+      const text = await res.text();
+      document.getElementById("result").textContent = text;
+
+      try {
+        const json = JSON.parse(text);
+        if (res.status === 200) {
+          // If MFA required: show OTP box; otherwise proceed as before
+          if (json.mfa_required) {
+            document.getElementById("mfaPanel").style.display = "block";
+            document.getElementById("mfaStatus").textContent = `Configured (${json.mfa_type}). Enter OTP to continue.`;
+            // Disable send box until MFA success
+            document.getElementById("loginBtn").hidden = true;
+            document.getElementById("signup").hidden = true;
+            document.getElementById("header").innerHTML = "Welcome, " + data.username;
+          } else {
+            hmac_tag = json.hmac;
+            document.getElementById("message").hidden = false;
+            document.getElementById("sendBtn").hidden = false;
+            document.getElementById("loginBtn").hidden = true;
+            document.getElementById("signup").hidden = true;
+            document.getElementById("header").innerHTML = "Welcome, " + data.username;
+          }
+        }
+      } catch(e) {
+        console.error(e);
+      }
+    }
+
+    async function verifyMFA() {
+      const code = document.getElementById("otp").value;
+      const windowSel = parseInt(document.getElementById("window").value, 10);
+      const lookAheadSel = parseInt(document.getElementById("lookAhead").value, 10);
+
+      const res = await fetch(`${base}/mfa/verify`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          username: lastUsername,
+          code: code,
+          window: windowSel,
+          look_ahead: lookAheadSel
+        })
+      });
+      const json = await res.json();
+      document.getElementById("result").textContent = JSON.stringify(json);
+
       if (res.status === 200) {
-        console.log("Login successful:", jsonResponse);
-        hmac_tag = jsonResponse.hmac; // Assuming the server returns a tag
+        hmac_tag = json.hmac;
+        document.getElementById("mfaPanel").style.display = "none";
         document.getElementById("message").hidden = false;
         document.getElementById("sendBtn").hidden = false;
-        document.getElementById("loginBtn").hidden = true;
-        document.getElementById("signup").hidden = true;
-        document.getElementById("header").innerHTML = "Welcome, " + data.username;
       } else {
-        console.error("Login failed:", jsonResponse);
+        document.getElementById("mfaStatus").textContent = "MFA failed. Try again.";
       }
     }
 
     async function sendMessage() {
       const message = document.getElementById("message").value;
-      const data = {
-        message: message,
-        hmac_tag: hmac_tag
-      };
+      const data = { message, hmac_tag };
       const res = await fetch(`${base}/message`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data)
       });
       document.getElementById("result").textContent = await res.text();
-      const jsonResponse = JSON.parse(document.getElementById("result").textContent);
-      if (res.status === 200) {
-        
-        console.log("Message sent successfully:", jsonResponse);
-      } else {
-        console.error("Message sending failed:", jsonResponse);
-
-      }
     }
   </script>
 </body>

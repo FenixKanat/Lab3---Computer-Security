@@ -9,6 +9,7 @@
   <h2>Register</h2>
   <input id="user" placeholder="Username">
   <input id="pass" placeholder="Password" type="password">
+
   <label for="algo">Select Hashing Algorithm:</label>
   <select id="algo">
     <option value="bcrypt">bcrypt</option>
@@ -16,26 +17,79 @@
     <option value="sha3">sha3</option>
     <option value="argon2">argon2</option>
   </select>
+
+  <!-- MFA choice on signup -->
+  <div style="margin-top:10px;">
+    <label for="mfa">Multi-factor authentication (optional):</label>
+    <select id="mfa">
+      <option value="none">None</option>
+      <option value="totp">TOTP (Time-based)</option>
+      <option value="hotp">HOTP (Counter-based)</option>
+    </select>
+  </div>
+
   <button onclick="register()">Register</button>
-  <a href="{{ url_for('home') }}" class="button-link">Back to Login</a>
+  <a href="{{ url_for('home') }}" class="button-link" id="backLink">Back to Login</a>
+
+  <div id="mfaEnroll" style="display:none; margin-top:1rem;">
+    <h3>MFA Enrollment</h3>
+    <div id="mfaMsg"></div>
+    <div id="qrBox" style="margin-top:.5rem;"></div>
+    <p style="margin-top:.5rem;">
+      <small>
+        Scan the QR with your authenticator (e.g., Google Authenticator, Authy, Microsoft Authenticator).
+        If it doesn’t scan, you can enter the secret manually.
+      </small>
+    </p>
+  </div>
+
   <pre id="result"></pre>
 
-  
   <script>
     const base = "http://127.0.0.1:5000";
 
     async function register() {
-      const data = {
-        username: document.getElementById("user").value,
-        password: document.getElementById("pass").value,
-        algo: document.getElementById("algo").value
-      };
+      const username = document.getElementById("user").value;
+      const password = document.getElementById("pass").value;
+      const algo = document.getElementById("algo").value;
+      const mfaChoice = document.getElementById("mfa").value;
+
       const res = await fetch(`${base}/register`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(data)
+        body: JSON.stringify({ username, password, algo })
       });
-      document.getElementById("result").textContent = await res.text();
+      const text = await res.text();
+      document.getElementById("result").textContent = text;
+
+      if (res.status === 201 && mfaChoice !== "none") {
+        enrollMFA(username, mfaChoice);
+      }
+    }
+
+    async function enrollMFA(username, type) {
+      document.getElementById("mfaEnroll").style.display = "block";
+      document.getElementById("mfaMsg").textContent = `Enrolling ${type.toUpperCase()} for ${username}...`;
+      document.getElementById("qrBox").textContent = "";
+
+      const res = await fetch(`${base}/mfa/enroll`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username, type })
+      });
+      const json = await res.json();
+
+      if (res.status === 200) {
+        document.getElementById("mfaMsg").textContent = `${type.toUpperCase()} enrolled. Scan the QR below:`;
+        document.getElementById("qrBox").innerHTML = `
+          <img src="${json.qr_data_url}" alt="QR" style="max-width:100%; border:1px solid #ddd; border-radius:8px;">
+          <div style="word-break:break-all; margin-top:.5rem;"><small>Secret: ${json.secret}</small></div>
+        `;
+        document.getElementById("backLink").scrollIntoView({ behavior: "smooth" });
+      } else {
+        document.getElementById("mfaMsg").textContent = "MFA enrollment failed:";
+        document.getElementById("qrBox").textContent = JSON.stringify(json, null, 2);
+      }
     }
   </script>
 </body>
