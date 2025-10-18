@@ -6,6 +6,7 @@ import hashlib
 from secrets import compare_digest
 import bcrypt
 from flask_cors import CORS
+from argon2 import low_level
 
 app = Flask(__name__)
 CORS(app)
@@ -15,6 +16,10 @@ app.config['PEPPER'] = os.environ.get('APP_PEPPER', 'change_this_pepper_for_demo
 
 PBKDF2_ITERATIONS = 200_000
 BCRYPT_ROUNDS = 12
+ARGON2_TIME_COST = 3
+ARGON2_MEMORY_COST = 64 * 1024
+ARGON2_PARALLELISM = 4
+ARGON2_HASH_LEN = 32
 USE_PEPPER = False
 
 
@@ -66,6 +71,23 @@ def verify_bcrypt(password: str, stored: str):
         stored = stored.encode('utf-8')
     return bcrypt.checkpw(password.encode('utf-8'), stored)
 
+def argon2_hash(password: str, salt: bytes):
+    password_bytes = password.encode('utf-8')
+    hashed_bytes = low_level.hash_secret_raw(
+        secret=password_bytes,
+        salt=salt,
+        time_cost=ARGON2_TIME_COST,
+        memory_cost=ARGON2_MEMORY_COST,
+        parallelism=ARGON2_PARALLELISM,
+        hash_len=ARGON2_HASH_LEN,
+        type=low_level.Type.ID
+    )
+    return hashed_bytes.hex(), salt.hex()
+
+def verify_argon2(attempted_password: str, stored_hash: str, salt: str):
+    (recomputed_hash, _) = argon2_hash(attempted_password, bytes.fromhex(salt))
+    return compare_digest(bytes.fromhex(recomputed_hash), bytes.fromhex(stored_hash))
+
 
 # ---------------- Routes ----------------
 @app.route('/')
@@ -98,6 +120,8 @@ def register():
             password_hash, salt = pbkdf2_hash(effective_password, generated_salt, algo)
         elif algo == 'bcrypt':
             (password_hash, salt) = bcrypt_hash(effective_password)
+        elif algo == 'argon2':
+            (password_hash, salt) = argon2_hash(effective_password, generated_salt)
         else:
             return jsonify({'error': 'Unsupported algorithm'}), 400
 
@@ -141,6 +165,8 @@ def login():
         verified = verify_pbkdf2(attempted_password, stored_hash, salt, algo)
     elif algo == 'bcrypt':
         verified = verify_bcrypt(attempted_password, stored_hash)
+    elif algo == 'argon2':
+        verified = verify_argon2(attempted_password, stored_hash, salt)
 
     print(f"[LOGIN] verified={verified}")
 
