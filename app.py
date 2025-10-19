@@ -1,13 +1,21 @@
-from flask import Flask, json, request, jsonify, render_template
+from flask import Flask, json, request, jsonify, render_template, session, g
 import sqlite3
 import os
 import base64
 import hashlib
 import hmac
-from secrets import compare_digest
 import bcrypt
+import uuid
+from enum import Enum
+from secrets import compare_digest
 from flask_cors import CORS
 from argon2 import low_level
+from fido2.webauthn import PublicKeyCredentialRpEntity, UserVerificationRequirement, RegistrationResponse, AuthenticationResponse, AttestedCredentialData, Aaguid
+from fido2.server import Fido2Server
+from fido2.utils import websafe_decode, websafe_encode
+from fido2 import cbor
+from fido2.cose import CoseKey
+
 
 from mfa import (
     random_secret,
@@ -19,11 +27,20 @@ from mfa import (
 )
 
 app = Flask(__name__)
+app.config['PEPPER'] = 'this_is_a_secret_pepper_value'
+app.config['SECRET_KEY'] = 'flask-session-secret-key' 
+
 CORS(app)
 
-DATABASE = 'users.db'
-app.config['PEPPER'] = 'this_is_a_secret_pepper_value'
+RP_ID = 'localhost' 
+RP_NAME = 'My Secure App'
+ORIGIN = 'http://localhost:5000' 
 
+rp = PublicKeyCredentialRpEntity(id=RP_ID, name=RP_NAME)
+fido2_server = Fido2Server(rp=rp, attestation="direct")
+
+DATABASE = 'users.db'
+# ---------------- Hashing parameters ----------------
 PBKDF2_ITERATIONS = 200_000
 BCRYPT_ROUNDS = 12
 ARGON2_TIME_COST = 3
@@ -45,16 +62,41 @@ def init_db():
                         algo TEXT NOT NULL,
                         mfa_secret TEXT)''')
         # MFA) minimal, additive columns ===
-        def add_column_if_missing(column, coldef):
-            cur = conn.execute("PRAGMA table_info(users)")
-            cols = [r[1] for r in cur.fetchall()]
-            if column not in cols:
-                conn.execute(f"ALTER TABLE users ADD COLUMN {column} {coldef}")
-        add_column_if_missing('mfa_type', 'TEXT')                      # 'totp' or 'hotp'
-        add_column_if_missing('hotp_counter', 'INTEGER DEFAULT 0')     # for HOTP resync demo
-        add_column_if_missing('mfa_accepts', 'INTEGER DEFAULT 0')      # stats
-        add_column_if_missing('mfa_failures', 'INTEGER DEFAULT 0')
+        add_column_if_missing(conn, 'mfa_type', 'TEXT')                      # 'totp' or 'hotp'
+        add_column_if_missing(conn, 'hotp_counter', 'INTEGER DEFAULT 0')     # for HOTP resync demo
+        add_column_if_missing(conn, 'mfa_accepts', 'INTEGER DEFAULT 0')      # stats
+        add_column_if_missing(conn, 'mfa_failures', 'INTEGER DEFAULT 0')
+        # FIDO2/WebAuthn columns ===
+        add_column_if_missing(conn, 'user_handle', 'TEXT')
+        # Create the new table for FIDO credentials
+        conn.execute('''CREATE TABLE IF NOT EXISTS fido_credentials(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        device_name TEXT, 
+                        credential_id TEXT NOT NULL UNIQUE, 
+                        public_key TEXT NOT NULL,
+                        FOREIGN KEY(user_id) REFERENCES users(id)
+                   )''')
 
+def add_column_if_missing(conn,column, coldef):
+    cur = conn.execute("PRAGMA table_info(users)")
+    cols = [r[1] for r in cur.fetchall()]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE users ADD COLUMN {column} {coldef}")
+
+def migrate_user_handles():
+    with sqlite3.connect(DATABASE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM users WHERE user_handle IS NULL")
+        users_to_update = cur.fetchall()
+        
+        for user in users_to_update:
+            # Generate a new, random, stable user handle (UUID is good)
+            user_handle = websafe_encode(uuid.uuid4().bytes)
+            conn.execute("UPDATE users SET user_handle = ? WHERE id = ?", (user_handle, user['id']))
+        print(f"Migrated user_handles for {len(users_to_update)} users.")
+        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_user_handle ON users (user_handle)')
 
 # ---------------- Hashing functions ----------------
 def generate_salt(length=16):
@@ -150,6 +192,18 @@ def verify_hmac(hmac_tag: str):
 
     return compare_digest(expected_tag, received_tag)
 
+# ---------------- Helper functions ----------------
+def get_current_user():
+    user = getattr(g, '_user', None)
+    if user is None and 'user_id' in session:
+        with sqlite3.connect(DATABASE) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM users WHERE id = ?", (session['user_id'],))
+            user = cur.fetchone()
+            g._user = user
+    return user
+
 
 # ---------------- Routes ----------------
 @app.route('/')
@@ -160,6 +214,10 @@ def home():
 @app.route('/signup')
 def signup():
     return render_template('signup.html')
+
+@app.route('/account')
+def account():
+    return render_template('account.html')
 
 
 @app.route('/register', methods=['POST'])
@@ -174,6 +232,7 @@ def register():
 
     generated_salt = generate_salt()
     effective_password = password
+    user_handle = websafe_encode(uuid.uuid4().bytes)
     if USE_PEPPER:
         effective_password = app.config['PEPPER'] + password
 
@@ -188,8 +247,8 @@ def register():
             return jsonify({'error': 'Unsupported algorithm'}), 400
 
         with sqlite3.connect(DATABASE) as conn:
-            conn.execute("INSERT INTO users (username, password_hash, salt, algo) VALUES (?, ?, ?, ?)",
-                         (username, password_hash, salt, algo))
+            conn.execute("INSERT INTO users (username, password_hash, salt, algo, user_handle) VALUES (?, ?, ?, ?, ?)",
+                         (username, password_hash, salt, algo, user_handle))
         print(f"[REGISTER] User '{username}' registered with {algo}")
         return jsonify({'message': 'User registered successfully', 'algo': algo}), 201
 
@@ -249,6 +308,7 @@ def login():
         # No MFA → same behavior as before
         naive_mac = create_naive_mac(user_id)
         hmac_tag = create_hmac(user_id)
+        session['user_id'] = user_id
         return jsonify({'message': 'Login successful', 'user_id': user_id, 'naive_mac': naive_mac, 'hmac': hmac_tag}), 200
     else:
         return jsonify({'error': 'Invalid username or password'}), 401
@@ -262,12 +322,180 @@ def message():
     if not message or not hmac_tag:
         return jsonify({'error': 'Message and HMAC tag are required'}), 400
 
-    # Verify the HMAC tag
+    
     if not verify_hmac(hmac_tag):
         return jsonify({'error': 'Invalid HMAC tag'}), 403
 
     print(f"[MESSAGE] {message}")
     return jsonify({'message': 'Message verified successfully with HMAC'}), 200
+
+
+@app.route('/webauthn/register/begin', methods=['POST'])
+def webauthn_register_begin():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Not logged in'}), 401
+
+    with sqlite3.connect(DATABASE) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT credential_id FROM fido_credentials WHERE user_id = ?", (user['id'],))
+        credential_ids_b64 = [row[0] for row in cur.fetchall()]
+
+    credential_ids_bytes = [websafe_decode(cred_id_b64) for cred_id_b64 in credential_ids_b64]
+
+    exclude_credentials_descriptors = [
+        {"type": "public-key", "id": cred_id_bytes}
+        for cred_id_bytes in credential_ids_bytes
+    ]
+
+    registration_data, state = fido2_server.register_begin(
+        {
+            'id': websafe_decode(user['user_handle']),
+            'name': user['username'],
+            'displayName': user['username'],
+        },
+        credentials=exclude_credentials_descriptors,
+        user_verification=UserVerificationRequirement.DISCOURAGED
+    )
+
+    session['webauthn_register_state'] = state
+
+    data_dict = dict(registration_data) 
+    
+    return jsonify(data_dict)
+
+
+@app.route('/webauthn/register/complete', methods=['POST'])
+def webauthn_register_complete():
+    user = get_current_user()
+    if not user:
+        return jsonify({'error': 'Not logged in'}), 401
+
+    data = request.get_json()
+    state = session.pop('webauthn_register_state', None)
+    device_name = data.pop('deviceName', 'Unnamed Key') 
+
+    try:
+        response = RegistrationResponse.from_dict(data)
+
+        auth_data = fido2_server.register_complete(state, response)
+    except Exception as e:
+        return jsonify({'error': f'Registration failed: {e}'}), 400
+
+    credential_data = auth_data.credential_data
+    credential_id_b64 = websafe_encode(credential_data.credential_id)
+    public_key_object = credential_data.public_key
+    public_key_cbor = cbor.encode(public_key_object)
+    public_key_b64 = websafe_encode(public_key_cbor)
+    
+    with sqlite3.connect(DATABASE) as conn:
+        conn.execute(
+            """INSERT INTO fido_credentials 
+               (user_id, device_name, credential_id, public_key) 
+               VALUES (?, ?, ?, ?)""",
+            (
+                user['id'],
+                device_name,
+                credential_id_b64,
+                public_key_b64
+            )
+        )
+
+    return jsonify({'status': 'ok', 'device_name': device_name})
+
+
+@app.route('/webauthn/login/begin', methods=['POST'])
+def webauthn_login_begin():
+    username = request.get_json().get('username')
+    if not username:
+        return jsonify({'error': 'Username required'}), 400
+
+    with sqlite3.connect(DATABASE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE username = ?", (username,))
+        user = cur.fetchone()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        
+        cur.execute("SELECT credential_id FROM fido_credentials WHERE user_id = ?", (user['id'],))
+        
+        credential_ids_b64 = [row['credential_id'] for row in cur.fetchall()]
+
+        if not credential_ids_b64:
+            return jsonify({'error': 'No FIDO credentials registered for this user'}), 400
+        
+        credential_ids_bytes = [websafe_decode(cred_id_b64) for cred_id_b64 in credential_ids_b64]
+
+        allow_credentials_descriptors = [
+            {"type": "public-key", "id": cred_id_bytes}
+            for cred_id_bytes in credential_ids_bytes
+        ]
+    auth_data, state = fido2_server.authenticate_begin(allow_credentials_descriptors, user_verification=UserVerificationRequirement.DISCOURAGED)
+
+    session['webauthn_login_state'] = state
+    session['webauthn_login_user_id'] = user['id'] 
+
+    data_dict = dict(auth_data)
+    
+    return jsonify(data_dict)
+
+
+@app.route('/webauthn/login/complete', methods=['POST'])
+def webauthn_login_complete():
+    data = request.get_json()
+    state = session.pop('webauthn_login_state', None)
+    user_id = session.pop('webauthn_login_user_id', None)
+
+    if not state or not user_id:
+        return jsonify({'error': 'Invalid state'}), 400
+
+    credential_id_b64 = data['id']
+
+    with sqlite3.connect(DATABASE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT public_key FROM fido_credentials
+               WHERE credential_id = ? AND user_id = ?""",
+            (credential_id_b64, user_id)
+        )
+        cred = cur.fetchone()
+
+    if not cred:
+        return jsonify({'error': 'Credential not found for this user'}), 404
+
+    try:
+        credential_id_bytes = websafe_decode(credential_id_b64)
+        public_key_cbor = websafe_decode(cred['public_key'])
+        public_key_dict = cbor.decode(public_key_cbor)
+        public_key_object = CoseKey.parse(public_key_dict)
+        stored_attested_credential = AttestedCredentialData.create(
+            Aaguid.NONE,
+            credential_id_bytes,
+            public_key_object
+        )
+
+        parsed_response = AuthenticationResponse.from_dict(data)
+
+        verified_credential_data = fido2_server.authenticate_complete(
+            state,
+            [stored_attested_credential],
+            parsed_response 
+        )
+
+    except ValueError as e:
+        return jsonify({'error': f'Login failed: {e}'}), 401
+    except Exception as e: 
+        print(f"!!! ERROR during authentication completion: {type(e).__name__} - {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Login failed: {e}'}), 500
+
+    session.clear()
+    session['user_id'] = user_id
+    hmac_tag = create_hmac(user_id)
+    return jsonify({'message': 'Login successful', 'user_id': user_id, 'hmac': hmac_tag}), 200
 
 # MFA
 @app.route('/mfa/enroll', methods=['POST'])
@@ -309,16 +537,7 @@ def mfa_enroll():
 
 @app.route('/mfa/verify', methods=['POST'])
 def mfa_verify():
-    """
-    Body:
-    {
-      "username": "...",
-      "code": "123456",
-      "window": 0|1,        # TOTP +/- (default 0)
-      "look_ahead": 0|1     # HOTP look-ahead (default 0)
-    }
-    On success, also returns 'hmac' so the client can proceed after password step.
-    """
+
     data = request.get_json(force=True)
     username = data.get('username')
     code = (data.get('code') or "").strip()
@@ -362,6 +581,7 @@ def mfa_verify():
             conn.execute("UPDATE users SET mfa_accepts=?, hotp_counter=? WHERE id=?",
                          (accepts, new_counter, user_id))
             hmac_tag = create_hmac(user_id)
+            session['user_id'] = user_id
             return jsonify({'result': 'accepted', 'type': 'hotp',
                             'matched_offset': matched_offset, 'new_counter': new_counter,
                             'accepts': accepts, 'failures': failures or 0, 'hmac': hmac_tag}), 200
@@ -373,11 +593,12 @@ def mfa_verify():
                             'accepts': accepts or 0, 'failures': failures}), 401
 
 
-# ---------------- Run app ----------------
 if __name__ == '__main__':
     arguments = os.sys.argv
     if len(arguments) > 1 and arguments[1] == 'pepper':
         USE_PEPPER = True
     init_db()
+    # Migrate existing users to have user_handles for FIDO
+    migrate_user_handles()
     print(f"Starting app with USE_PEPPER = {USE_PEPPER}")
     app.run(host='0.0.0.0', port=5000, debug=False)

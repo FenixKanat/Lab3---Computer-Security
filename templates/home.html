@@ -9,9 +9,10 @@
   <h2 id="header">Log in</h2>
   <input id="user" placeholder="Username">
   <input id="pass" placeholder="Password" type="password">
-  <button id="loginBtn" onclick="login()">Log in</button>
+  
+  <button id="loginBtn" onclick="login()">Log in (Password)</button>
+  <button id="fidoBtn" onclick="loginWebAuthn()">Login with Security Key</button>
 
-  <!-- OTP only shows if /login says MFA is required -->
   <div id="mfaPanel" style="display:none; margin-top: 1rem;">
     <h3>MFA required</h3>
     <div id="mfaStatus" style="margin-bottom:.5rem;"></div>
@@ -37,13 +38,139 @@
 
   <input id="message" placeholder="Message" hidden="true">
   <button id="sendBtn" onclick="sendMessage()" hidden="true">Send</button>
-  <a id="signup" href="{{ url_for('signup') }}" class="button-link">Create Account</a>
+  
+  <div>
+    <a id="signup" href="{{ url_for('signup') }}" class="button-link">Create Account</a>
+  </div>
+  
+  <a id="accountLink" href="{{ url_for('account') }}" class="button-link" style="display:none; margin-top: 1rem;">
+    Manage Security Settings (Add FIDO Key)
+  </a>
 
   <pre id="result"></pre>
+  
   <script>
-    const base = "http://127.0.0.1:5000";
+    const base = "http://localhost:5000";
     let hmac_tag = "";
     let lastUsername = "";
+
+
+    function base64url_to_arraybuffer(str) {
+        let s = str.replace(/-/g, '+').replace(/_/g, '/').padEnd(str.length + (4 - str.length % 4) % 4, '=');
+        let binary_string = window.atob(s);
+        let len = binary_string.length;
+        let bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binary_string.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    function arraybuffer_to_base64url(buffer) {
+        let binary = '';
+        let bytes = new Uint8Array(buffer);
+        let len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+
+    function convertOptionsToBinary(options) {
+    if (options.publicKey && options.publicKey.challenge) {
+        options.publicKey.challenge = base64url_to_arraybuffer(options.publicKey.challenge);
+    }
+    if (options.publicKey && options.publicKey.user && options.publicKey.user.id) {
+        options.publicKey.user.id = base64url_to_arraybuffer(options.publicKey.user.id);
+    }
+    if (options.publicKey && options.publicKey.excludeCredentials) {
+        for (let cred of options.publicKey.excludeCredentials) {
+            if (cred.id) { 
+               cred.id = base64url_to_arraybuffer(cred.id);
+            }
+        }
+    }
+    
+    if (options.publicKey && options.publicKey.allowCredentials) {
+         for (let cred of options.publicKey.allowCredentials) {
+            if (cred.id) { 
+               cred.id = base64url_to_arraybuffer(cred.id);
+            }
+        }
+    }
+    
+    return options.publicKey; 
+}
+
+
+    async function loginWebAuthn() {
+        const username = document.getElementById('user').value; 
+        if (!username) {
+            alert("Please enter your username first.");
+            return;
+        }
+        document.getElementById("result").textContent = "Checking for security key...";
+
+        const resp = await fetch(`${base}/webauthn/login/begin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: username })
+        });
+        
+        let optionsFromServer = await resp.json();
+
+        if (optionsFromServer.error) {
+            document.getElementById("result").textContent = `Error: ${optionsFromServer.error}`;
+            return;
+        }
+
+        let publicKeyOptions = convertOptionsToBinary(optionsFromServer);
+        document.getElementById("result").textContent = "Please touch your security key...";
+
+        let assertion;
+        try {
+            
+            assertion = await navigator.credentials.get({ publicKey: publicKeyOptions });
+        } catch (e) {
+            console.error('Login failed:', e);
+            document.getElementById("result").textContent = 'FIDO login cancelled or failed.';
+            return;
+        }
+
+        const loginData = {
+            id: assertion.id,
+            rawId: arraybuffer_to_base64url(assertion.rawId),
+            type: assertion.type,
+            response: {
+                authenticatorData: arraybuffer_to_base64url(assertion.response.authenticatorData),
+                clientDataJSON: arraybuffer_to_base64url(assertion.response.clientDataJSON),
+                signature: arraybuffer_to_base64url(assertion.response.signature),
+                userHandle: assertion.response.userHandle ? arraybuffer_to_base64url(assertion.response.userHandle) : null,
+            },
+        };
+        
+        const respComplete = await fetch(`${base}/webauthn/login/complete`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(loginData)
+        });
+
+        const text = await respComplete.text();
+        document.getElementById("result").textContent = text;
+        const json = JSON.parse(text);
+        if (respComplete.status === 200) {
+            hmac_tag = json.hmac;
+            document.getElementById("header").innerHTML = "Welcome, " + username;
+            document.getElementById("message").hidden = false;
+            document.getElementById("sendBtn").hidden = false;
+            document.getElementById("loginBtn").hidden = true;
+            document.getElementById("fidoBtn").hidden = true;
+            document.getElementById("signup").hidden = true;
+            document.getElementById("accountLink").style.display = "block"; 
+        } else {
+            alert(`Login failed: ${result.error}`);
+        }
+    }
 
     async function login() {
       const data = {
@@ -67,8 +194,8 @@
           if (json.mfa_required) {
             document.getElementById("mfaPanel").style.display = "block";
             document.getElementById("mfaStatus").textContent = `Configured (${json.mfa_type}). Enter OTP to continue.`;
-            // Disable send box until MFA success
             document.getElementById("loginBtn").hidden = true;
+            document.getElementById("fidoBtn").hidden = true; 
             document.getElementById("signup").hidden = true;
             document.getElementById("header").innerHTML = "Welcome, " + data.username;
           } else {
@@ -76,8 +203,10 @@
             document.getElementById("message").hidden = false;
             document.getElementById("sendBtn").hidden = false;
             document.getElementById("loginBtn").hidden = true;
+            document.getElementById("fidoBtn").hidden = true; 
             document.getElementById("signup").hidden = true;
             document.getElementById("header").innerHTML = "Welcome, " + data.username;
+            document.getElementById("accountLink").style.display = "block"; 
           }
         }
       } catch(e) {
@@ -108,6 +237,7 @@
         document.getElementById("mfaPanel").style.display = "none";
         document.getElementById("message").hidden = false;
         document.getElementById("sendBtn").hidden = false;
+        document.getElementById("accountLink").style.display = "block"; 
       } else {
         document.getElementById("mfaStatus").textContent = "MFA failed. Try again.";
       }
