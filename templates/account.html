@@ -6,6 +6,8 @@
     <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
 </head>
 <body>
+    <div id="siteBanner" class="banner" aria-live="polite"></div>
+
     <h2>Account Security</h2>
     <p>Manage your registered security keys.</p>
 
@@ -18,8 +20,18 @@
     <pre id="result"></pre>
 
 <script>
-    const base = "http://localhost:5000";
+    const base = window.location.origin;
 
+    (function banner() {
+      const b = document.getElementById('siteBanner');
+      if (location.port === "5001") {
+        b.classList.add('phish');
+        b.textContent = `⚠️ Demo phishing site (MITM proxy): ${location.origin}`;
+      } else {
+        b.classList.add('real');
+        b.textContent = `✅ Real site (RP origin): ${location.origin}`;
+      }
+    })();
 
     function base64url_to_arraybuffer(str) {
         let s = str.replace(/-/g, '+').replace(/_/g, '/').padEnd(str.length + (4 - str.length % 4) % 4, '=');
@@ -42,34 +54,25 @@
         return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     }
 
-function convertOptionsToBinary(options) {
-    
-    if (options.publicKey && options.publicKey.challenge) {
-        options.publicKey.challenge = base64url_to_arraybuffer(options.publicKey.challenge);
-    }
-    
-    if (options.publicKey && options.publicKey.user && options.publicKey.user.id) {
-        options.publicKey.user.id = base64url_to_arraybuffer(options.publicKey.user.id);
-    }
-    
-    if (options.publicKey && options.publicKey.excludeCredentials) {
-        for (let cred of options.publicKey.excludeCredentials) {
-            if (cred.id) { 
-               cred.id = base64url_to_arraybuffer(cred.id);
+    function convertOptionsToBinary(options) {
+        if (options.publicKey && options.publicKey.challenge) {
+            options.publicKey.challenge = base64url_to_arraybuffer(options.publicKey.challenge);
+        }
+        if (options.publicKey && options.publicKey.user && options.publicKey.user.id) {
+            options.publicKey.user.id = base64url_to_arraybuffer(options.publicKey.user.id);
+        }
+        if (options.publicKey && options.publicKey.excludeCredentials) {
+            for (let cred of options.publicKey.excludeCredentials) {
+                if (cred.id) cred.id = base64url_to_arraybuffer(cred.id);
             }
         }
-    }
-    
-    if (options.publicKey && options.publicKey.allowCredentials) {
-         for (let cred of options.publicKey.allowCredentials) {
-            if (cred.id) { 
-               cred.id = base64url_to_arraybuffer(cred.id);
+        if (options.publicKey && options.publicKey.allowCredentials) {
+            for (let cred of options.publicKey.allowCredentials) {
+                if (cred.id) cred.id = base64url_to_arraybuffer(cred.id);
             }
         }
+        return options.publicKey;
     }
-    
-    return options.publicKey; 
-}
 
     async function registerWebAuthn() {
         document.getElementById("result").textContent = "Starting registration... Please touch your security key.";
@@ -81,25 +84,20 @@ function convertOptionsToBinary(options) {
             return;
         }
 
-        
         let publicKeyOptions = convertOptionsToBinary(optionsFromServer); 
         let credential;
         try {
-            
             credential = await navigator.credentials.create({ publicKey: publicKeyOptions });
         } catch (e) {
             console.error('Registration failed:', e);
-            if(e.message ==="The user attempted to register an authenticator that contains one of the credentials already registered with the relying party." )
-            {
+            if (e.message === "The user attempted to register an authenticator that contains one of the credentials already registered with the relying party.") {
                 document.getElementById("result").textContent = '[ERROR]Security key is already registered with your account.';
-            }
-            else{
+            } else {
                 document.getElementById("result").textContent = 'Registration cancelled or failed.';
             }
             return;
         }
 
-        
         const registrationData = {
             id: credential.id,
             rawId: arraybuffer_to_base64url(credential.rawId),
@@ -108,7 +106,6 @@ function convertOptionsToBinary(options) {
                 attestationObject: arraybuffer_to_base64url(credential.response.attestationObject),
                 clientDataJSON: arraybuffer_to_base64url(credential.response.clientDataJSON),
             },
-            
             deviceName: prompt("Enter a name for this key (e.g., 'My Laptop'):", "Security Key")
         };
         
@@ -117,7 +114,6 @@ function convertOptionsToBinary(options) {
             return;
         }
 
-        
         const respComplete = await fetch(`${base}/webauthn/register/complete`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -125,10 +121,8 @@ function convertOptionsToBinary(options) {
         });
 
         const result = await respComplete.json();
-        
         if (result.status === 'ok') {
             document.getElementById("result").textContent = `Successfully registered key: ${result.device_name}`;
-            
         } else {
             document.getElementById("result").textContent = `Failed to register: ${result.error}`;
         }

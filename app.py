@@ -16,7 +16,6 @@ from fido2.utils import websafe_decode, websafe_encode
 from fido2 import cbor
 from fido2.cose import CoseKey
 
-
 from mfa import (
     random_secret,
     otpauth_uri_totp,
@@ -26,18 +25,28 @@ from mfa import (
     verify_hotp_and_advance,
 )
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="static", template_folder="templates")
 app.config['PEPPER'] = 'this_is_a_secret_pepper_value'
-app.config['SECRET_KEY'] = 'flask-session-secret-key' 
+app.config['SECRET_KEY'] = 'flask-session-secret-key'  # real app's session secret
 
 CORS(app)
 
-RP_ID = 'localhost' 
+# ---- WebAuthn relying party config (REAL SITE) ----
+RP_ID = 'localhost'                           # effective domain (no scheme/port)
 RP_NAME = 'My Secure App'
-ORIGIN = 'http://localhost:5000' 
+ORIGIN = 'http://localhost:5000'              # strict trusted origin
 
 rp = PublicKeyCredentialRpEntity(id=RP_ID, name=RP_NAME)
-fido2_server = Fido2Server(rp=rp, attestation="direct")
+
+# Enforce strict origin check so phishing origin fails.
+def verify_origin(origin: str) -> bool:
+    ok = (origin == ORIGIN)
+    if not ok:
+        print(f"[WebAuthn] Origin check FAILED: got '{origin}', expected '{ORIGIN}'")
+    return ok
+
+# IMPORTANT: This makes the phishing proxy fail for WebAuthn.
+fido2_server = Fido2Server(rp=rp, attestation="direct", verify_origin=verify_origin)
 
 DATABASE = 'users.db'
 # ---------------- Hashing parameters ----------------
@@ -50,7 +59,6 @@ ARGON2_HASH_LEN = 32
 USE_PEPPER = False
 MAC_SECRET_KEY = b'super_secret_mac_key'
 
-
 # ---------------- Database ----------------
 def init_db():
     with sqlite3.connect(DATABASE) as conn:
@@ -61,14 +69,13 @@ def init_db():
                         salt TEXT,
                         algo TEXT NOT NULL,
                         mfa_secret TEXT)''')
-        # MFA) minimal, additive columns ===
-        add_column_if_missing(conn, 'mfa_type', 'TEXT')                      # 'totp' or 'hotp'
-        add_column_if_missing(conn, 'hotp_counter', 'INTEGER DEFAULT 0')     # for HOTP resync demo
-        add_column_if_missing(conn, 'mfa_accepts', 'INTEGER DEFAULT 0')      # stats
+        # MFA
+        add_column_if_missing(conn, 'mfa_type', 'TEXT')
+        add_column_if_missing(conn, 'hotp_counter', 'INTEGER DEFAULT 0')
+        add_column_if_missing(conn, 'mfa_accepts', 'INTEGER DEFAULT 0')
         add_column_if_missing(conn, 'mfa_failures', 'INTEGER DEFAULT 0')
-        # FIDO2/WebAuthn columns ===
+        # FIDO2
         add_column_if_missing(conn, 'user_handle', 'TEXT')
-        # Create the new table for FIDO credentials
         conn.execute('''CREATE TABLE IF NOT EXISTS fido_credentials(
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         user_id INTEGER NOT NULL,
@@ -90,9 +97,7 @@ def migrate_user_handles():
         cur = conn.cursor()
         cur.execute("SELECT id FROM users WHERE user_handle IS NULL")
         users_to_update = cur.fetchall()
-        
         for user in users_to_update:
-            # Generate a new, random, stable user handle (UUID is good)
             user_handle = websafe_encode(uuid.uuid4().bytes)
             conn.execute("UPDATE users SET user_handle = ? WHERE id = ?", (user_handle, user['id']))
         print(f"Migrated user_handles for {len(users_to_update)} users.")
@@ -102,7 +107,6 @@ def migrate_user_handles():
 def generate_salt(length=16):
     return os.urandom(length)
 
-# Both SHA-256 and SHA-3 belong to Password-Based Key Derivation Function 2
 def pbkdf2_hash(password: str, salt: bytes, algo: str, iterations=PBKDF2_ITERATIONS):
     password_bytes = password.encode('utf-8')
     if algo == 'sha256':
@@ -111,23 +115,17 @@ def pbkdf2_hash(password: str, salt: bytes, algo: str, iterations=PBKDF2_ITERATI
         hashed_bytes = hashlib.pbkdf2_hmac("sha3_256", password=password_bytes, salt=salt, iterations=iterations)
     else:
         raise ValueError("Unsupported pbkdf2 algorithm")
-
     return hashed_bytes.hex(), salt.hex()
 
-
 def verify_pbkdf2(attempted_password: str, stored_hash: str, salt: str, algo: str, iterations=PBKDF2_ITERATIONS):
-
     (recomputed_hash, _) = pbkdf2_hash(attempted_password, bytes.fromhex(salt), algo, iterations=iterations)
     return compare_digest(bytes.fromhex(recomputed_hash), bytes.fromhex(stored_hash))
-
-
 
 def bcrypt_hash(password: str):
     pw = password.encode('utf-8')
     salt = bcrypt.gensalt(rounds=BCRYPT_ROUNDS)
     h = bcrypt.hashpw(pw, salt)
     return (h.decode('utf-8'), salt.decode('utf-8'))
-
 
 def verify_bcrypt(password: str, stored: str):
     if isinstance(stored, str):
@@ -152,44 +150,34 @@ def verify_argon2(attempted_password: str, stored_hash: str, salt: str):
     return compare_digest(bytes.fromhex(recomputed_hash), bytes.fromhex(stored_hash))
 
 # ---------------- MAC/HMAC functions ----------------
-
 def create_naive_mac(user_id: int):
-    
     payload = {'user_id': user_id}
     data_bytes = json.dumps(payload).encode('utf-8')
     data_b64 = base64.b64encode(data_bytes).decode('utf-8')
     mac = hashlib.sha256(MAC_SECRET_KEY + data_bytes).hexdigest()
-
     return f"{data_b64}.{mac}"
 
 def create_hmac(user_id: int):
-
     payload = {'user_id': user_id}
     data_bytes = json.dumps(payload).encode('utf-8')
     data_b64 = base64.b64encode(data_bytes).decode('utf-8')
-
-    hmac_tag = hmac.new(MAC_SECRET_KEY, data_bytes, hashlib.sha256)
-    h = hmac_tag.hexdigest()
-
-    return f"{data_b64}.{h}"
+    hmac_tag = hmac.new(MAC_SECRET_KEY, data_bytes, hashlib.sha256).hexdigest()
+    return f"{data_b64}.{hmac_tag}"
 
 def verify_hmac(hmac_tag: str):
     try:
         data_b64, received_tag = hmac_tag.split('.', 1)
     except ValueError:
         return None 
-        
     try:
         data_str = base64.b64decode(data_b64).decode('utf-8')
     except Exception:
         return None 
-    
     expected_tag = hmac.new(
         key=MAC_SECRET_KEY, 
         msg=data_str.encode('utf-8'), 
         digestmod=hashlib.sha256
     ).hexdigest()
-
     return compare_digest(expected_tag, received_tag)
 
 # ---------------- Helper functions ----------------
@@ -204,7 +192,6 @@ def get_current_user():
             g._user = user
     return user
 
-
 # ---------------- Routes ----------------
 @app.route('/')
 @app.route('/home')
@@ -218,7 +205,6 @@ def signup():
 @app.route('/account')
 def account():
     return render_template('account.html')
-
 
 @app.route('/register', methods=['POST'])
 def register():
@@ -258,7 +244,6 @@ def register():
         print("[ERROR REGISTER]", e)
         return jsonify({'error': 'Internal server error'}), 500
 
-
 @app.route('/login', methods=['POST'])
 def login():
     data = request.get_json(force=True)
@@ -292,20 +277,17 @@ def login():
     print(f"[LOGIN] verified={verified}")
 
     if verified:
-        # If user has MFA, require OTP before issuing final hmac
         with sqlite3.connect(DATABASE) as conn:
             cur = conn.execute("SELECT mfa_secret, mfa_type FROM users WHERE id = ?", (user_id,))
             mfa_row = cur.fetchone()
         mfa_required = bool(mfa_row and mfa_row[0])
         if mfa_required:
-            # Do NOT send final hmac yet. Client must call /mfa/verify to get it.
             return jsonify({
                 'message': 'Password OK — MFA required',
                 'user_id': user_id,
                 'mfa_required': True,
                 'mfa_type': mfa_row[1]
             }), 200
-        # No MFA → same behavior as before
         naive_mac = create_naive_mac(user_id)
         hmac_tag = create_hmac(user_id)
         session['user_id'] = user_id
@@ -322,14 +304,13 @@ def message():
     if not message or not hmac_tag:
         return jsonify({'error': 'Message and HMAC tag are required'}), 400
 
-    
     if not verify_hmac(hmac_tag):
         return jsonify({'error': 'Invalid HMAC tag'}), 403
 
     print(f"[MESSAGE] {message}")
     return jsonify({'message': 'Message verified successfully with HMAC'}), 200
 
-
+# ---------- WebAuthn (REAL SITE) ----------
 @app.route('/webauthn/register/begin', methods=['POST'])
 def webauthn_register_begin():
     user = get_current_user()
@@ -342,11 +323,7 @@ def webauthn_register_begin():
         credential_ids_b64 = [row[0] for row in cur.fetchall()]
 
     credential_ids_bytes = [websafe_decode(cred_id_b64) for cred_id_b64 in credential_ids_b64]
-
-    exclude_credentials_descriptors = [
-        {"type": "public-key", "id": cred_id_bytes}
-        for cred_id_bytes in credential_ids_bytes
-    ]
+    exclude_credentials_descriptors = [{"type": "public-key", "id": cred_id_bytes} for cred_id_bytes in credential_ids_bytes]
 
     registration_data, state = fido2_server.register_begin(
         {
@@ -359,11 +336,8 @@ def webauthn_register_begin():
     )
 
     session['webauthn_register_state'] = state
-
     data_dict = dict(registration_data) 
-    
     return jsonify(data_dict)
-
 
 @app.route('/webauthn/register/complete', methods=['POST'])
 def webauthn_register_complete():
@@ -377,7 +351,6 @@ def webauthn_register_complete():
 
     try:
         response = RegistrationResponse.from_dict(data)
-
         auth_data = fido2_server.register_complete(state, response)
     except Exception as e:
         return jsonify({'error': f'Registration failed: {e}'}), 400
@@ -393,16 +366,10 @@ def webauthn_register_complete():
             """INSERT INTO fido_credentials 
                (user_id, device_name, credential_id, public_key) 
                VALUES (?, ?, ?, ?)""",
-            (
-                user['id'],
-                device_name,
-                credential_id_b64,
-                public_key_b64
-            )
+            (user['id'], device_name, credential_id_b64, public_key_b64)
         )
 
     return jsonify({'status': 'ok', 'device_name': device_name})
-
 
 @app.route('/webauthn/login/begin', methods=['POST'])
 def webauthn_login_begin():
@@ -419,27 +386,22 @@ def webauthn_login_begin():
             return jsonify({'error': 'User not found'}), 404
         
         cur.execute("SELECT credential_id FROM fido_credentials WHERE user_id = ?", (user['id'],))
-        
         credential_ids_b64 = [row['credential_id'] for row in cur.fetchall()]
-
         if not credential_ids_b64:
             return jsonify({'error': 'No FIDO credentials registered for this user'}), 400
         
         credential_ids_bytes = [websafe_decode(cred_id_b64) for cred_id_b64 in credential_ids_b64]
+        allow_credentials_descriptors = [{"type": "public-key", "id": cred_id_bytes} for cred_id_bytes in credential_ids_bytes]
 
-        allow_credentials_descriptors = [
-            {"type": "public-key", "id": cred_id_bytes}
-            for cred_id_bytes in credential_ids_bytes
-        ]
-    auth_data, state = fido2_server.authenticate_begin(allow_credentials_descriptors, user_verification=UserVerificationRequirement.DISCOURAGED)
+    auth_data, state = fido2_server.authenticate_begin(
+        allow_credentials_descriptors,
+        user_verification=UserVerificationRequirement.DISCOURAGED
+    )
 
     session['webauthn_login_state'] = state
     session['webauthn_login_user_id'] = user['id'] 
-
     data_dict = dict(auth_data)
-    
     return jsonify(data_dict)
-
 
 @app.route('/webauthn/login/complete', methods=['POST'])
 def webauthn_login_complete():
@@ -481,7 +443,7 @@ def webauthn_login_complete():
         verified_credential_data = fido2_server.authenticate_complete(
             state,
             [stored_attested_credential],
-            parsed_response 
+            parsed_response
         )
 
     except ValueError as e:
@@ -497,13 +459,9 @@ def webauthn_login_complete():
     hmac_tag = create_hmac(user_id)
     return jsonify({'message': 'Login successful', 'user_id': user_id, 'hmac': hmac_tag}), 200
 
-# MFA
+# ---------- MFA ----------
 @app.route('/mfa/enroll', methods=['POST'])
 def mfa_enroll():
-    """
-    Body: { "username": "...", "type": "totp" | "hotp" }
-    Creates secret, stores it, returns otpauth URI + QR data URL.
-    """
     data = request.get_json(force=True)
     username = data.get('username')
     mfa_type = (data.get('type') or 'totp').lower()
@@ -528,16 +486,14 @@ def mfa_enroll():
 
     qr_url = qr_data_url(uri)
     return jsonify({
-        'message': f'{mfa_type.upper()} MFA enrolled',
+        'message': f'{mfa_type.UPPER()} MFA enrolled' if hasattr(mfa_type, 'UPPER') else f'{mfa_type.upper()} MFA enrolled',
         'secret': secret,
         'otpauth_uri': uri,
         'qr_data_url': qr_url
     }), 200
 
-
 @app.route('/mfa/verify', methods=['POST'])
 def mfa_verify():
-
     data = request.get_json(force=True)
     username = data.get('username')
     code = (data.get('code') or "").strip()
@@ -563,7 +519,6 @@ def mfa_verify():
             if ok:
                 accepts = (accepts or 0) + 1
                 conn.execute("UPDATE users SET mfa_accepts=? WHERE id=?", (accepts, user_id))
-                # Issue final token now that MFA passed
                 hmac_tag = create_hmac(user_id)
                 return jsonify({'result': 'accepted', 'type': 'totp', 'window': window,
                                 'accepts': accepts, 'failures': failures or 0, 'hmac': hmac_tag}), 200
@@ -573,7 +528,6 @@ def mfa_verify():
                 return jsonify({'result': 'rejected', 'type': 'totp', 'window': window,
                                 'accepts': accepts or 0, 'failures': failures}), 401
 
-        # HOTP:
         hotp_counter = hotp_counter or 0
         ok, new_counter, matched_offset = verify_hotp_and_advance(secret, code, hotp_counter, look_ahead=look_ahead)
         if ok:
@@ -592,13 +546,11 @@ def mfa_verify():
                             'look_ahead': look_ahead, 'server_counter': hotp_counter,
                             'accepts': accepts or 0, 'failures': failures}), 401
 
-
 if __name__ == '__main__':
     arguments = os.sys.argv
     if len(arguments) > 1 and arguments[1] == 'pepper':
         USE_PEPPER = True
     init_db()
-    # Migrate existing users to have user_handles for FIDO
     migrate_user_handles()
-    print(f"Starting app with USE_PEPPER = {USE_PEPPER}")
+    print(f"Starting REAL app with USE_PEPPER = {USE_PEPPER}, ORIGIN = {ORIGIN}")
     app.run(host='0.0.0.0', port=5000, debug=False)

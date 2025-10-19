@@ -6,6 +6,8 @@
     <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
 </head>
 <body>
+  <div id="siteBanner" class="banner" aria-live="polite"></div>
+
   <h2>Register</h2>
   <input id="user" placeholder="Username">
   <input id="pass" placeholder="Password" type="password">
@@ -18,7 +20,6 @@
     <option value="argon2">argon2</option>
   </select>
 
-  <!-- MFA choice on signup -->
   <div style="margin-top:10px;">
     <label for="mfa">Multi-factor authentication (optional):</label>
     <select id="mfa">
@@ -46,7 +47,18 @@
   <pre id="result"></pre>
 
   <script>
-    const base = "http://localhost:5000";
+    const base = window.location.origin;
+
+    (function banner() {
+      const b = document.getElementById('siteBanner');
+      if (location.port === "5001") {
+        b.classList.add('phish');
+        b.textContent = `⚠️ Demo phishing site (MITM proxy): ${location.origin}`;
+      } else {
+        b.classList.add('real');
+        b.textContent = `✅ Real site (RP origin): ${location.origin}`;
+      }
+    })();
 
     async function register() {
       const username = document.getElementById("user").value;

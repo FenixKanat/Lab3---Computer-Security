@@ -6,6 +6,8 @@
     <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
 </head>
 <body>
+  <div id="siteBanner" class="banner" aria-live="polite"></div>
+
   <h2 id="header">Log in</h2>
   <input id="user" placeholder="Username">
   <input id="pass" placeholder="Password" type="password">
@@ -34,6 +36,7 @@
       </div>
     </div>
     <button onclick="verifyMFA()">Verify OTP</button>
+    <p class="small">Through a phishing proxy, an attacker can forward this OTP and get in.</p>
   </div>
 
   <input id="message" placeholder="Message" hidden="true">
@@ -50,65 +53,61 @@
   <pre id="result"></pre>
   
   <script>
-    const base = "http://localhost:5000";
+    // IMPORTANT: Make API calls to *this* origin (real site on :5000 OR phishing proxy on :5001)
+    const base = window.location.origin;
+
+    // Banner: show if real or phishing
+    (function banner() {
+      const b = document.getElementById('siteBanner');
+      if (location.port === "5001") {
+        b.classList.add('phish');
+        b.textContent = `⚠️ Demo phishing site (MITM proxy): ${location.origin}`;
+      } else {
+        b.classList.add('real');
+        b.textContent = `✅ Real site (RP origin): ${location.origin}`;
+      }
+    })();
+
     let hmac_tag = "";
     let lastUsername = "";
-
 
     function base64url_to_arraybuffer(str) {
         let s = str.replace(/-/g, '+').replace(/_/g, '/').padEnd(str.length + (4 - str.length % 4) % 4, '=');
         let binary_string = window.atob(s);
         let len = binary_string.length;
         let bytes = new Uint8Array(len);
-        for (let i = 0; i < len; i++) {
-            bytes[i] = binary_string.charCodeAt(i);
-        }
+        for (let i = 0; i < len; i++) bytes[i] = binary_string.charCodeAt(i);
         return bytes.buffer;
     }
-
     function arraybuffer_to_base64url(buffer) {
         let binary = '';
         let bytes = new Uint8Array(buffer);
-        let len = bytes.byteLength;
-        for (let i = 0; i < len; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
+        for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
         return window.btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     }
-
     function convertOptionsToBinary(options) {
-    if (options.publicKey && options.publicKey.challenge) {
-        options.publicKey.challenge = base64url_to_arraybuffer(options.publicKey.challenge);
+      if (options.publicKey && options.publicKey.challenge) {
+          options.publicKey.challenge = base64url_to_arraybuffer(options.publicKey.challenge);
+      }
+      if (options.publicKey && options.publicKey.user && options.publicKey.user.id) {
+          options.publicKey.user.id = base64url_to_arraybuffer(options.publicKey.user.id);
+      }
+      if (options.publicKey && options.publicKey.excludeCredentials) {
+          for (let cred of options.publicKey.excludeCredentials) {
+              if (cred.id) cred.id = base64url_to_arraybuffer(cred.id);
+          }
+      }
+      if (options.publicKey && options.publicKey.allowCredentials) {
+          for (let cred of options.publicKey.allowCredentials) {
+              if (cred.id) cred.id = base64url_to_arraybuffer(cred.id);
+          }
+      }
+      return options.publicKey;
     }
-    if (options.publicKey && options.publicKey.user && options.publicKey.user.id) {
-        options.publicKey.user.id = base64url_to_arraybuffer(options.publicKey.user.id);
-    }
-    if (options.publicKey && options.publicKey.excludeCredentials) {
-        for (let cred of options.publicKey.excludeCredentials) {
-            if (cred.id) { 
-               cred.id = base64url_to_arraybuffer(cred.id);
-            }
-        }
-    }
-    
-    if (options.publicKey && options.publicKey.allowCredentials) {
-         for (let cred of options.publicKey.allowCredentials) {
-            if (cred.id) { 
-               cred.id = base64url_to_arraybuffer(cred.id);
-            }
-        }
-    }
-    
-    return options.publicKey; 
-}
-
 
     async function loginWebAuthn() {
         const username = document.getElementById('user').value; 
-        if (!username) {
-            alert("Please enter your username first.");
-            return;
-        }
+        if (!username) { alert("Please enter your username first."); return; }
         document.getElementById("result").textContent = "Checking for security key...";
 
         const resp = await fetch(`${base}/webauthn/login/begin`, {
@@ -116,9 +115,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username: username })
         });
-        
         let optionsFromServer = await resp.json();
-
         if (optionsFromServer.error) {
             document.getElementById("result").textContent = `Error: ${optionsFromServer.error}`;
             return;
@@ -126,10 +123,8 @@
 
         let publicKeyOptions = convertOptionsToBinary(optionsFromServer);
         document.getElementById("result").textContent = "Please touch your security key...";
-
         let assertion;
         try {
-            
             assertion = await navigator.credentials.get({ publicKey: publicKeyOptions });
         } catch (e) {
             console.error('Login failed:', e);
@@ -157,19 +152,21 @@
 
         const text = await respComplete.text();
         document.getElementById("result").textContent = text;
-        const json = JSON.parse(text);
-        if (respComplete.status === 200) {
-            hmac_tag = json.hmac;
-            document.getElementById("header").innerHTML = "Welcome, " + username;
-            document.getElementById("message").hidden = false;
-            document.getElementById("sendBtn").hidden = false;
-            document.getElementById("loginBtn").hidden = true;
-            document.getElementById("fidoBtn").hidden = true;
-            document.getElementById("signup").hidden = true;
-            document.getElementById("accountLink").style.display = "block"; 
-        } else {
-            alert(`Login failed: ${result.error}`);
-        }
+        try {
+          const json = JSON.parse(text);
+          if (respComplete.status === 200) {
+              hmac_tag = json.hmac;
+              document.getElementById("header").innerHTML = "Welcome, " + username;
+              document.getElementById("message").hidden = false;
+              document.getElementById("sendBtn").hidden = false;
+              document.getElementById("loginBtn").hidden = true;
+              document.getElementById("fidoBtn").hidden = true;
+              document.getElementById("signup").hidden = true;
+              document.getElementById("accountLink").style.display = "block"; 
+          } else {
+              alert(`FIDO login failed (expected through phishing): ${json.error}`);
+          }
+        } catch(e) {}
     }
 
     async function login() {
@@ -190,7 +187,6 @@
       try {
         const json = JSON.parse(text);
         if (res.status === 200) {
-          // If MFA required: show OTP box; otherwise proceed as before
           if (json.mfa_required) {
             document.getElementById("mfaPanel").style.display = "block";
             document.getElementById("mfaStatus").textContent = `Configured (${json.mfa_type}). Enter OTP to continue.`;
@@ -209,9 +205,7 @@
             document.getElementById("accountLink").style.display = "block"; 
           }
         }
-      } catch(e) {
-        console.error(e);
-      }
+      } catch(e) { console.error(e); }
     }
 
     async function verifyMFA() {

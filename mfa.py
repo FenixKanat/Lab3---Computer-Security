@@ -15,7 +15,6 @@ def otpauth_uri_totp(secret: str, username: str) -> str:
     return totp.provisioning_uri(name=username, issuer_name=ISSUER_NAME)
 
 def otpauth_uri_hotp(secret: str, username: str, counter: int = 0) -> str:
-    # Many authenticators accept HOTP otpauth URIs with a counter param.
     return f"otpauth://hotp/{ISSUER_NAME}:{username}?secret={secret}&issuer={ISSUER_NAME}&counter={counter}"
 
 def qr_data_url(uri: str) -> str:
@@ -27,7 +26,6 @@ def qr_data_url(uri: str) -> str:
     return f"data:image/png;base64,{b64}"
 
 # ---- Verification helpers ----
-
 def verify_totp(secret: str, code: str, window: int = 0) -> bool:
     """
     window=0 → only current 30s step.

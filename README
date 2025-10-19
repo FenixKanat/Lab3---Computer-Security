@@ -17,3 +17,12 @@
 
 3. **Access the app**
     Open your browser and go to: http://localhost:5000/
+
+4. **Run the Demo MITM phishing site**
+
+    ```
+    python.exe mitm.py
+    ```
+
+5. **Access Demo MITM phishing site**
+    Open your browser and go to: http://127.0.0.1:5001/

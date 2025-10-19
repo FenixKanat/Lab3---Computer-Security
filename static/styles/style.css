@@ -1,10 +1,10 @@
 body {
     font-family: sans-serif;
-    max-width: 400px;
+    max-width: 640px;
     margin: 2rem auto;
- }
+}
 
-input, button {
+input, button, select {
     width: 100%;
     margin: .5rem 0;
     padding: .5rem;
@@ -16,6 +16,7 @@ pre {
     padding: 1rem;
     text-wrap: wrap;
     border-radius: 8px;
+    overflow-x: auto;
 }
 
 .checkbox-container {
@@ -25,4 +26,37 @@ pre {
 
 .checkbox-container div {
     padding: 10px;
+}
+
+.button-link {
+    display: inline-block;
+    text-decoration: none;
+    background: #0b5ed7;
+    color: #fff;
+    padding: .5rem .75rem;
+    border-radius: .5rem;
+}
+
+/* Banners to distinguish real vs phishing site */
+.banner {
+    padding: .75rem 1rem;
+    border-radius: .5rem;
+    margin-bottom: 1rem;
+    font-weight: bold;
+}
+.banner.real {
+    background: #e7f5ff;
+    border: 1px solid #a5d8ff;
+    color: #0b7285;
+}
+.banner.phish {
+    background: #fff5f5;
+    border: 1px solid #ffa8a8;
+    color: #c92a2a;
+}
+
+/* Small helper */
+.small {
+    font-size: .85rem;
+    color: #555;
 }
