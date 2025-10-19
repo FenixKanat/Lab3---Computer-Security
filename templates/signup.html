@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Register</title>
-    <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
+  <meta charset="UTF-8">
+  <title>Register</title>
+  <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
 </head>
 <body>
   <h2>Register</h2>
@@ -18,7 +18,6 @@
     <option value="argon2">argon2</option>
   </select>
 
-  <!-- MFA choice on signup -->
   <div style="margin-top:10px;">
     <label for="mfa">Multi-factor authentication (optional):</label>
     <select id="mfa">
@@ -29,6 +28,7 @@
   </div>
 
   <button onclick="register()">Register</button>
+  <button id="regPasskeyBtn" onclick="registerPasskey()" hidden>Register a Passkey</button>
   <a href="{{ url_for('home') }}" class="button-link" id="backLink">Back to Login</a>
 
   <div id="mfaEnroll" style="display:none; margin-top:1rem;">
@@ -46,7 +46,24 @@
   <pre id="result"></pre>
 
   <script>
-    const base = "http://127.0.0.1:5000";
+    // IMPORTANT: use http://localhost:5000 so WebAuthn RP-ID/origin match.
+    const base = "http://localhost:5000";
+
+    function b64urlToBuf(b64url) {
+      const pad = '='.repeat((4 - b64url.length % 4) % 4);
+      const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+      const raw = atob(b64);
+      const buf = new ArrayBuffer(raw.length);
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < raw.length; ++i) bytes[i] = raw.charCodeAt(i);
+      return buf;
+    }
+    function bufToB64url(buf) {
+      const bytes = new Uint8Array(buf);
+      let s = '';
+      for (const b of bytes) s += String.fromCharCode(b);
+      return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/,'');
+    }
 
     async function register() {
       const username = document.getElementById("user").value;
@@ -59,11 +76,17 @@
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ username, password, algo })
       });
+
       const text = await res.text();
       document.getElementById("result").textContent = text;
 
-      if (res.status === 201 && mfaChoice !== "none") {
-        enrollMFA(username, mfaChoice);
+      if (res.status === 201) {
+        // show Passkey button
+        document.getElementById("regPasskeyBtn").hidden = false;
+        // enroll OTP if chosen
+        if (mfaChoice !== "none") {
+          enrollMFA(username, mfaChoice);
+        }
       }
     }
 
@@ -90,6 +113,56 @@
         document.getElementById("mfaMsg").textContent = "MFA enrollment failed:";
         document.getElementById("qrBox").textContent = JSON.stringify(json, null, 2);
       }
+    }
+
+    // ----- WebAuthn: Register Passkey -----
+    async function registerPasskey() {
+      const username = document.getElementById("user").value;
+      if (!username) {
+        alert("Enter the same username you just registered first.");
+        return;
+      }
+      // Get creation options from server
+      const optRes = await fetch(`${base}/webauthn/register/options`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username })
+      });
+      const options = await optRes.json();
+
+      // Fix binary fields → ArrayBuffers
+      options.challenge = b64urlToBuf(options.challenge);
+      options.user.id = b64urlToBuf(options.user.id);
+      if (Array.isArray(options.excludeCredentials)) {
+        options.excludeCredentials = options.excludeCredentials.map(c => ({
+          ...c, id: b64urlToBuf(c.id)
+        }));
+      }
+
+      // Create credential
+      const cred = await navigator.credentials.create({ publicKey: options });
+
+      // Package results → base64url
+      const credential = {
+        id: cred.id,
+        type: cred.type,
+        rawId: bufToB64url(cred.rawId),
+        response: {
+          attestationObject: bufToB64url(cred.response.attestationObject),
+          clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+          transports: cred.response.getTransports ? cred.response.getTransports() : []
+        },
+        clientExtensionResults: cred.getClientExtensionResults?.() || {},
+        authenticatorAttachment: cred.authenticatorAttachment || null
+      };
+
+      const verifyRes = await fetch(`${base}/webauthn/register/verify`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username, credential })
+      });
+      const verifyJson = await verifyRes.json();
+      document.getElementById("result").textContent = JSON.stringify(verifyJson, null, 2);
     }
   </script>
 </body>

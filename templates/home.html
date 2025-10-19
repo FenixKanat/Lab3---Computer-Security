@@ -1,15 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>FlaskApp Home</title>
-    <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
+  <meta charset="UTF-8">
+  <title>FlaskApp Home</title>
+  <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
 </head>
 <body>
   <h2 id="header">Log in</h2>
   <input id="user" placeholder="Username">
   <input id="pass" placeholder="Password" type="password">
   <button id="loginBtn" onclick="login()">Log in</button>
+
+  <button id="passkeyLoginBtn" onclick="loginWithPasskey()" style="margin-top:6px;">Sign in with Passkey</button>
 
   <!-- OTP only shows if /login says MFA is required -->
   <div id="mfaPanel" style="display:none; margin-top: 1rem;">
@@ -41,9 +43,26 @@
 
   <pre id="result"></pre>
   <script>
-    const base = "http://127.0.0.1:5000";
+    // IMPORTANT: use http://localhost:5000 so WebAuthn ORIGIN matches server verify.
+    const base = "http://localhost:5000";
     let hmac_tag = "";
     let lastUsername = "";
+
+    function b64urlToBuf(b64url) {
+      const pad = '='.repeat((4 - b64url.length % 4) % 4);
+      const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+      const raw = atob(b64);
+      const buf = new ArrayBuffer(raw.length);
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < raw.length; ++i) bytes[i] = raw.charCodeAt(i);
+      return buf;
+    }
+    function bufToB64url(buf) {
+      const bytes = new Uint8Array(buf);
+      let s = '';
+      for (const b of bytes) s += String.fromCharCode(b);
+      return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/,'');
+    }
 
     async function login() {
       const data = {
@@ -63,11 +82,9 @@
       try {
         const json = JSON.parse(text);
         if (res.status === 200) {
-          // If MFA required: show OTP box; otherwise proceed as before
           if (json.mfa_required) {
             document.getElementById("mfaPanel").style.display = "block";
             document.getElementById("mfaStatus").textContent = `Configured (${json.mfa_type}). Enter OTP to continue.`;
-            // Disable send box until MFA success
             document.getElementById("loginBtn").hidden = true;
             document.getElementById("signup").hidden = true;
             document.getElementById("header").innerHTML = "Welcome, " + data.username;
@@ -122,6 +139,67 @@
         body: JSON.stringify(data)
       });
       document.getElementById("result").textContent = await res.text();
+    }
+
+    // ----- WebAuthn: Passkey sign-in -----
+    async function loginWithPasskey() {
+      const username = document.getElementById("user").value;
+      if (!username) {
+        alert("Enter your username first so the server can choose the right credential.");
+        return;
+      }
+      lastUsername = username;
+
+      // 1) options from server
+      const optRes = await fetch(`${base}/webauthn/authenticate/options`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username })
+      });
+      const options = await optRes.json();
+      if (optRes.status !== 200) {
+        document.getElementById("result").textContent = JSON.stringify(options, null, 2);
+        return;
+      }
+      options.challenge = b64urlToBuf(options.challenge);
+      if (Array.isArray(options.allowCredentials)) {
+        options.allowCredentials = options.allowCredentials.map(c => ({...c, id: b64urlToBuf(c.id)}));
+      }
+
+      // 2) browser performs assertion
+      const assertion = await navigator.credentials.get({ publicKey: options });
+
+      const credential = {
+        id: assertion.id,
+        type: assertion.type,
+        rawId: bufToB64url(assertion.rawId),
+        response: {
+          authenticatorData: bufToB64url(assertion.response.authenticatorData),
+          clientDataJSON: bufToB64url(assertion.response.clientDataJSON),
+          signature: bufToB64url(assertion.response.signature),
+          userHandle: assertion.response.userHandle ? bufToB64url(assertion.response.userHandle) : null
+        },
+        clientExtensionResults: assertion.getClientExtensionResults?.() || {},
+        authenticatorAttachment: assertion.authenticatorAttachment || null
+      };
+
+      // 3) verify at server
+      const verifyRes = await fetch(`${base}/webauthn/authenticate/verify`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username, credential })
+      });
+      const verifyJson = await verifyRes.json();
+      document.getElementById("result").textContent = JSON.stringify(verifyJson, null, 2);
+
+      if (verifyRes.status === 200) {
+        hmac_tag = verifyJson.hmac;
+        document.getElementById("message").hidden = false;
+        document.getElementById("sendBtn").hidden = false;
+        document.getElementById("loginBtn").hidden = true;
+        document.getElementById("signup").hidden = true;
+        document.getElementById("header").innerHTML = "Welcome, " + username;
+      }
     }
   </script>
 </body>

